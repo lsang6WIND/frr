@@ -19,6 +19,14 @@ static void bgp_l2vpn_entry_deleted(const char *l2vpn_name)
 	/* XXX handle l2vpn entry deletion */
 }
 
+/*
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/control-word
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/pw-id
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/pw-status
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-address
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-lsr-id
+ */
 static void bgp_l2vpn_entry_event(const char *l2vpn_name)
 {
 	/* XXX handle l2vpn changes */
