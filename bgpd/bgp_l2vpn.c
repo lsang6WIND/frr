@@ -9,6 +9,13 @@
 
 #include "bgpd/bgp_l2vpn.h"
 
+/*
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/pw-type
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/mtu
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/bridge-interface
+ * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-interface
+ */
 static void bgp_l2vpn_entry_added(const char *l2vpn_name)
 {
 	/* XXX handle l2vpn entry add */
@@ -27,7 +34,7 @@ static void bgp_l2vpn_entry_deleted(const char *l2vpn_name)
  * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-address
  * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-lsr-id
  */
-static void bgp_l2vpn_entry_event(const char *l2vpn_name)
+static void bgp_l2vpn_entry_event(struct l2vpn_pw *l2vpn_pw)
 {
 	/* XXX handle l2vpn changes */
 }
