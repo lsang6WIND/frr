@@ -210,7 +210,7 @@ void l2vpn_init()
 	l2vpn_cli_init();
 }
 
-const char *l2vpn_svc_error_code(uint8_t status)
+const char *l2vpn_svc_error_code(uint32_t status)
 {
 	static char buf[16];
 
