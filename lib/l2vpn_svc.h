@@ -52,7 +52,24 @@ struct l2vpn_svc {
 	uint16_t remote_mtu;
 	uint32_t local_status;
 	uint32_t remote_status;
+
+	/* PW flags */
+#define F_PW_STATUSTLV_CONF  (1 << 0) /* status tlv configured */
+#define F_PW_STATUSTLV       (1 << 1) /* status tlv negotiated */
+#define F_PW_CWORD_CONF      (1 << 2) /* control word configured */
+#define F_PW_CWORD           (1 << 3) /* control word negotiated */
+#define F_PW_STATIC_NBR_ADDR (1 << 4) /* static neighbor address configured */
+#define F_PW_SEND_REMOTE     (1 << 5) /* send pw message to remote */
+	/* EVPN flags */
+#define F_EVPN_NBR_ADDR      (1 << 6) /* EVPN neighbor configured */
 	uint8_t	 flags;
+
+	/* L2VPN reason code */
+#define F_L2VPN_NO_ERR             0x00 /* no error reported */
+#define F_L2VPN_LOCAL_NOT_FWD      0x01 /* locally can't forward over PW */
+#define F_L2VPN_REMOTE_NOT_FWD     0x02 /* remote end of PW reported fwd error*/
+#define F_L2VPN_NO_REMOTE_LABEL    0x03 /* have not recvd label from peer */
+#define F_L2VPN_MTU_MISMATCH       0x04 /* mtu mismatch between peers */
 	uint8_t	 reason;
 
 	QOBJ_FIELDS;
@@ -60,21 +77,6 @@ struct l2vpn_svc {
 RB_HEAD(l2vpn_svc_head, l2vpn_svc);
 RB_PROTOTYPE(l2vpn_svc_head, l2vpn_svc, entry, l2vpn_svc_compare);
 DECLARE_QOBJ_TYPE(l2vpn_svc);
-#define F_PW_STATUSTLV_CONF     0x01	/* status tlv configured */
-#define F_PW_STATUSTLV		0x02	/* status tlv negotiated */
-#define F_PW_CWORD_CONF		0x04	/* control word configured */
-#define F_PW_CWORD		0x08	/* control word negotiated */
-#define F_PW_STATIC_NBR_ADDR	0x10	/* static neighbor address configured */
-#define F_PW_SEND_REMOTE	0x20	/* send pw message to remote */
-#define F_EVPN_NBR_ADDR         0x40    /* EVPN neighbor configured */
-
-
-#define F_L2VPN_NO_ERR             0x00 /* no error reported */
-#define F_L2VPN_LOCAL_NOT_FWD      0x01 /* locally can't forward over PW */
-#define F_L2VPN_REMOTE_NOT_FWD     0x02 /* remote end of PW reported fwd error*/
-#define F_L2VPN_NO_REMOTE_LABEL    0x03 /* have not recvd label from peer */
-#define F_L2VPN_MTU_MISMATCH       0x04 /* mtu mismatch between peers */
-
 
 struct l2vpn {
 	RB_ENTRY(l2vpn)		 entry;
