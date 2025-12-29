@@ -154,6 +154,7 @@ void zebra_l2vpn_svc_update(struct zebra_l2vpn_svc *svc)
 		 * Install or reinstall the pseudowire (e.g. to update
 		 * parameters like the nexthop or the use of the control word).
 		 */
+		event_cancel(&svc->install_retry_timer);
 		zebra_l2vpn_svc_install(svc);
 	}
 }
