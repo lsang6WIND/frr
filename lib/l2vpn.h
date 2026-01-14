@@ -15,6 +15,10 @@ extern "C" {
 
 typedef enum { L2VPN_TYPE_VPWS = 1, L2VPN_TYPE_VPLS = 2 } l2vpn_types;
 
+extern void l2vpn_cli_init(void);
+extern const struct frr_yang_module_info frr_l2vpn;
+extern const struct frr_yang_module_info frr_l2vpn_cli_info;
+
 /* L2VPN name length. */
 #define L2VPN_NAME_LEN           32
 #define  DEFAULT_L2VPN_MTU       1500
