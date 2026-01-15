@@ -498,23 +498,13 @@ uint32_t bgp_evpn_vpws_vni_del(struct bgp *bgp, struct bgpevpn *vpn)
 	return 0;
 }
 
-static void bgp_l2vpn_vpws_status_change(struct l2vpn_svc *l2vpn_svc, int status)
-{
-	char buf[ESI_STR_LEN];
-
-	if (BGP_DEBUG(evpn, EVPN_VPWS)) {
-		esi_to_str(&l2vpn_svc->esi, buf, ESI_STR_LEN);
-		zlog_debug("BGP VPWS: EVI %u esi %s switch status from %d to %d",
-			   l2vpn_svc->evi, buf, l2vpn_svc->local_status, status);
-	}
-
-	if (l2vpn_svc->local_status == PW_LOCAL_TX_FAULT)
-		bgp_l2vpn_vpws_run(l2vpn_svc);
-}
-
 void bgp_l2vpn_svc_update_status(struct zapi_pw_status *zpw) {
 	struct l2vpn *l2vpn;
 	struct l2vpn_svc *l2vpn_svc, s;
+	struct bgp *bgp;
+	struct bgpevpn *vpn;
+	bool withdraw_needed = false, update_needed = false;
+	char errmsg[BUFSIZ], buf[ESI_STR_LEN], buf2[ESI_STR_LEN];
 
 	strlcpy(s.ifname, zpw->ifname, IFNAMSIZ);
 	RB_FOREACH (l2vpn, l2vpn_head, &l2vpn_tree_config) {
@@ -523,12 +513,44 @@ void bgp_l2vpn_svc_update_status(struct zapi_pw_status *zpw) {
 
 		l2vpn_svc = RB_FIND(l2vpn_svc_head, &l2vpn->svc_tree, &s);
 		if (l2vpn_svc) {
+			esi_to_str(&l2vpn_svc->esi, buf, ESI_STR_LEN);
+			if (memcmp(&l2vpn_svc->esi, &zpw->esi, sizeof(esi_t))) {
+				esi_to_str(&l2vpn_svc->esi, buf2, ESI_STR_LEN);
+				snprintf(errmsg, sizeof(errmsg), "ESI changed from %s to %s", buf,
+					 buf2);
+				withdraw_needed = true;
+				update_needed = true;
+			}
+
+			if (l2vpn_svc->local_status != zpw->status) {
+				snprintf(errmsg, sizeof(errmsg), "switch status from %s to %s",
+					 pw_status_to_str(l2vpn_svc->local_status),
+					 pw_status_to_str(zpw->status));
+				if (zpw->status == PW_FORWARDING)
+					update_needed = true;
+				else
+					withdraw_needed = true;
+			}
+
+			if ((update_needed || withdraw_needed) && BGP_DEBUG(evpn, EVPN_VPWS))
+				zlog_debug("%s: VPWS local-ac %u, remote-ac %u withdraw %sneeded, update %sneeded, reason: %s",
+					   __func__, l2vpn_svc->local_ac_id, l2vpn_pw->remote_ac_id,
+					   withdraw_needed ? "" : "not ",
+					   update_needed ? "" : "not ", errmsg);
+			if (withdraw_needed) {
+				/* send withdraw RT1 with old ESI */
+				bgp = bgp_get_evpn();
+				vpn = bgp_evpn_lookup_vni(bgp, l2vpn_svc>vni);
+				bgp_l2vpn_vpws_local_withdraw(bgp, l2vpn_svc, vpn);
+			}
+
 			memcpy(&l2vpn_svc->esi, &zpw->esi, sizeof(esi_t));
 			strlcpy(l2vpn_svc->local_ac, zpw->local_ac, IFNAMSIZ);
-			if (l2vpn_svc->local_status != zpw->status)
-				bgp_l2vpn_vpws_status_change(l2vpn_svc, zpw->status);
-
 			l2vpn_svc->local_status = zpw->status;
+
+			if (update_needed && l2vpn_svc->local_status != PW_LOCAL_TX_FAULT)
+				/* send update RT1 */
+				bgp_l2vpn_vpws_run(l2vpn_svc);
 		}
 	}
 }
