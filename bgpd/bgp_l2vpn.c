@@ -22,7 +22,7 @@ static void bgp_l2vpn_vpws_run(struct l2vpn_svc *l2vpn_svc);
 void bgp_l2vpn_vpws_local_withdraw(struct bgp *bgp, struct l2vpn_svc *l2vpn_svc,
 				   struct bgpevpn *vpn);
 static bool is_l2vpn_vpws_ready(struct bgp *bgp, struct l2vpn *l2vpn,
-				struct l2vpn_svc *l2vpn_svc, const char **pmsg);
+				struct l2vpn_svc *l2vpn_svc, char *errmsg, size_t len);
 void bgp_pw2zpw(struct l2vpn_svc *pw, struct zapi_pw *zpw);
 static bool bgp_l2vpn_vpws_zebra_add(struct l2vpn_svc *l2vpn_svc, bool add);
 
@@ -88,7 +88,7 @@ static void bgp_l2vpn_entry_deleted(const char *l2vpn_name)
  */
 static void bgp_l2vpn_entry_event(struct l2vpn_svc *l2vpn_svc)
 {
-	const char *pmsg;
+	char errmsg[BUFSIZ];
 	bool running_change;
 	struct bgpevpn *vpn;
 	struct bgp *bgp = bgp_get_evpn();
@@ -104,11 +104,11 @@ static void bgp_l2vpn_entry_event(struct l2vpn_svc *l2vpn_svc)
 
 	/* Try move inactive svc to active */
 	if (!running_change) {
-		if (!is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, &pmsg)) {
+		if (!is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, errmsg, sizeof(errmsg))) {
 			if (BGP_DEBUG(evpn, EVPN_VPWS))
 				zlog_debug("%s: VPWS local-ac %u remote-ac %u no ready, reason: %s",
 					   __func__, l2vpn_svc->local_ac_id, l2vpn_svc->remote_ac_id,
-					   pmsg);
+					   errmsg);
 			return;
 		}
 
@@ -122,7 +122,8 @@ static void bgp_l2vpn_entry_event(struct l2vpn_svc *l2vpn_svc)
 	}
 
 	/* Update running svc */
-	if (l2vpn_svc->enabled && is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, &pmsg))
+	if (l2vpn_svc->enabled && is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, errmsg,
+						      sizeof(errmsg)))
 		return;
 
 	RB_REMOVE(l2vpn_svc_head, &l2vpn->svc_tree, l2vpn_svc);
@@ -205,34 +206,34 @@ void bgp_l2vpn_init(void)
 }
 
 static bool is_l2vpn_vpws_ready(struct bgp *bgp, struct l2vpn *l2vpn,
-				struct l2vpn_svc *l2vpn_svc, const char **pmsg)
+				struct l2vpn_svc *l2vpn_svc, char *errmsg, size_t len)
 {
 	struct bgpevpn *vpn;
 	struct interface *ifp;
 
 	if (!l2vpn_svc->enabled) {
-		*pmsg = "status disabled";
+		snprintf(errmsg, len, "status disabled");
 		return false;
 	}
 
 	if (!l2vpn_svc->evi) {
-		*pmsg = "Missing EVPN instance identifier";
+		snprintf(errmsg, len, "Missing EVPN instance identifier");
 		return false;
 	}
 
 	if (!l2vpn_svc->local_ac_id || !l2vpn_svc->remote_ac_id) {
-		*pmsg = "Missing local/remote ac id";
+		snprintf(errmsg, len, "Missing local/remote ac id");
 		return false;
 	}
 
 	if (!l2vpn_svc->vni) {
-		*pmsg = "Missing BGP EVPN VNI config";
+		snprintf(errmsg, len, "Missing BGP EVPN VNI config");
 		return false;
 	}
 
 	vpn = bgp_evpn_lookup_vni(bgp, l2vpn_svc->vni);
 	if (!vpn) {
-		*pmsg = "Can not find VPN for vni";
+		snprintf(errmsg, len, "Can not find VPN for vni");
 		return false;
 	}
 	l2vpn->br_ifindex = vpn->svi_ifindex;
@@ -240,7 +241,7 @@ static bool is_l2vpn_vpws_ready(struct bgp *bgp, struct l2vpn *l2vpn,
 
 	ifp = if_lookup_by_name(l2vpn_svc->ifname, bgp->vrf_id);
 	if (!ifp) {
-		*pmsg = "EVPN VPWS interface not found";
+		snprintf(errmsg, len, "EVPN VPWS interface %s not found", l2vpn_svc->ifname);
 		return false;
 	}
 	l2vpn_svc->ifindex = ifp->ifindex;
@@ -429,7 +430,7 @@ uint32_t bgp_l2vpn_vpws_es_add(esi_t esi)
 bool bgp_evpn_vpws_vni_changed(struct bgp *bgp, struct bgpevpn *vpn,
 			       vrf_id_t tenant_vrf_id)
 {
-	const char *pmsg;
+	char errmsg[BUFSIZ];
 	struct l2vpn *l2vpn;
 	struct l2vpn_svc *l2vpn_svc, *l2vpn_svc_nxt;
 
@@ -448,11 +449,11 @@ bool bgp_evpn_vpws_vni_changed(struct bgp *bgp, struct bgpevpn *vpn,
 
 			if (!l2vpn_svc->enabled)
 				continue;
-			if (!is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, &pmsg)) {
+			if (!is_l2vpn_vpws_ready(bgp, l2vpn, l2vpn_svc, errmsg, sizeof(errmsg))) {
 				if (BGP_DEBUG(evpn, EVPN_VPWS))
 					zlog_debug("%s: VPWS local-ac %u, remote-ac %u no ready, reason: %s",
 						   __func__, l2vpn_svc->local_ac_id,
-						   l2vpn_svc->remote_ac_id, pmsg);
+						   l2vpn_svc->remote_ac_id, errmsg);
 				continue;
 			}
 
