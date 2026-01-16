@@ -4135,11 +4135,12 @@ bgp_zebra_read_pw_status_update(ZAPI_CALLBACK_ARGS)
 	zebra_read_pw_status_update(cmd, zclient, length, vrf_id, &zpw);
 	stream_get(&zpw.esi, zclient->ibuf, sizeof(esi_t));
 	stream_get(zpw.local_ac, zclient->ibuf, IFNAMSIZ);
+	zpw.mtu = stream_getl(zclient->ibuf);
 
 	if (BGP_DEBUG(zebra, ZEBRA))
-		zlog_debug("%s: pseudowire %s status 0x%x loacl-ac %s", zpw.ifname,
-			   (zpw.status == PW_FORWARDING) ? "up" : "down", zpw.status,
-			   zpw.local_ac);
+		zlog_debug("%s: pseudowire %s status 0x%x loacl-ac %s, mtu %d", zpw.ifname,
+			   (zpw.status == PW_FORWARDING) ? "up" : "down", zpw.status, zpw.local_ac,
+			   zpw.mtu);
 
 	/* update status in L2VPN */
 	bgp_l2vpn_svc_update_status(&zpw);

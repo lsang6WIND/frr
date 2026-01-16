@@ -697,6 +697,7 @@ struct zapi_pw_status {
 	ifindex_t ifindex;
 	uint32_t status;
 	esi_t esi;
+	uint32_t mtu;
 };
 
 /* IGP instance data associated to a RLFA. */

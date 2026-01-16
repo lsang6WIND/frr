@@ -30,6 +30,7 @@
 #include "zebra/zebra_vxlan.h"
 #include "zebra/zebra_vxlan_if.h"
 #include "zebra/zebra_evpn_mh.h"
+#include "zebra/zebra_l2vpn_svc.h"
 
 /* definitions */
 
@@ -466,6 +467,9 @@ void zebra_l2if_update_bridge_slave(struct interface *ifp,
 			zebra_vxlan_if_update(ifp, &ctx);
 		if (zif->es_info.es)
 			zebra_evpn_es_local_br_port_update(zif);
+
+		/* call L2VPN to inform an AC may have been added */
+		zebra_l2vpn_ac_updated(ifp);
 	} else if (old_bridge_ifindex != IFINDEX_INTERNAL) {
 		/*
 		 * In the case of VxLAN, invoke the handler for EVPN.
@@ -477,6 +481,9 @@ void zebra_l2if_update_bridge_slave(struct interface *ifp,
 		if (zif->es_info.es)
 			zebra_evpn_es_local_br_port_update(zif);
 		zebra_l2_unmap_slave_from_bridge(&zif->brslave_info);
+
+		/* call L2VPN to inform an AC may have been detached */
+		zebra_l2vpn_ac_updated(ifp);
 	}
 }
 

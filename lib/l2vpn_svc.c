@@ -117,6 +117,7 @@ struct l2vpn_svc *l2vpn_svc_new(struct l2vpn *l2vpn, const char *ifname)
 	svc->l2vpn = l2vpn;
 	svc->ignore_mtu_mismatch = true;
 	svc->enabled = true;
+	svc->mtu = DEFAULT_L2VPN_MTU;
 	strlcpy(svc->ifname, ifname, sizeof(svc->ifname));
 
 	return (svc);
