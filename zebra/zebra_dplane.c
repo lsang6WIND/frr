@@ -4197,10 +4197,16 @@ static int dplane_ctx_l2vpn_svc_init(struct zebra_dplane_ctx *ctx,
 	const struct nexthop_group *nhg;
 	struct nexthop *nh, *newnh, *last_nh;
 
-	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
-		zlog_debug("init dplane ctx %s: L2vpn service '%s', loc %u, rem %u",
-			   dplane_op2str(op), svc->ifname, svc->local_label,
-			   svc->remote_label);
+	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL) {
+		if (op == DPLANE_OP_EVPN_VXLAN_INSTALL || op == DPLANE_OP_EVPN_VXLAN_UNINSTALL)
+			zlog_debug("init dplane ctx %s: L2VPN service '%s', vni %u, neigh %pI4",
+				   dplane_op2str(op), svc->ifname, svc->data.bgp.vni,
+				   &svc->nexthop.ipv4);
+		else
+			zlog_debug("init dplane ctx %s: L2VPN service '%s', loc %u, rem %u",
+				   dplane_op2str(op), svc->ifname, svc->local_label,
+				   svc->remote_label);
+        }
 
 	ctx->zd_op = op;
 	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
@@ -6871,6 +6877,7 @@ void dplane_provider_enqueue_to_zebra(struct zebra_dplane_ctx *ctx)
 static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 {
 	char buf[PREFIX_STRLEN];
+	const struct ipaddr *addr;
 
 	switch (dplane_ctx_get_op(ctx)) {
 
@@ -6924,6 +6931,13 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 
 	case DPLANE_OP_EVPN_VXLAN_INSTALL:
 	case DPLANE_OP_EVPN_VXLAN_UNINSTALL:
+		addr = dplane_ctx_neigh_get_ipaddr(ctx);
+		zlog_debug("Dplane pw %s: op %s neigh %s, vni %u",
+                           dplane_ctx_get_ifname(ctx),
+			   dplane_op2str(ctx->zd_op),
+                           ipaddr2str(addr, buf, sizeof(buf)),
+			   dplane_ctx_neigh_get_vni(ctx));
+		break;
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:
 	case DPLANE_OP_NEIGH_DELETE:
