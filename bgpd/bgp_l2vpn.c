@@ -499,13 +499,19 @@ uint32_t bgp_evpn_vpws_vni_del(struct bgp *bgp, struct bgpevpn *vpn)
 	return 0;
 }
 
+/* Read new evpn vpws status and data from zebra.
+ * Update is need:
+ *  - evpn vpws local status switching from EVPN_LOCAL_TX_FAULT to EVPN_NOT_FORWARDING.
+ *  - evpn vpws local status is fell back to EVPN_LOCAL_TX_FAULT.
+ */
 void bgp_l2vpn_svc_update_status(struct zapi_pw_status *zpw) {
 	struct l2vpn *l2vpn;
 	struct l2vpn_svc *l2vpn_svc, s;
-	struct bgp *bgp;
 	struct bgpevpn *vpn;
-	bool withdraw_needed = false, update_needed = false;
-	char errmsg[BUFSIZ], buf[ESI_STR_LEN], buf2[ESI_STR_LEN];
+	struct interface *ifp;
+	bool update_needed = false;
+	struct bgp_interface *binfo;
+	struct bgp *bgp = bgp_get_evpn();
 
 	strlcpy(s.ifname, zpw->ifname, IFNAMSIZ);
 	RB_FOREACH (l2vpn, l2vpn_head, &l2vpn_tree_config) {
@@ -513,45 +519,53 @@ void bgp_l2vpn_svc_update_status(struct zapi_pw_status *zpw) {
 			continue;
 
 		l2vpn_svc = RB_FIND(l2vpn_svc_head, &l2vpn->svc_tree, &s);
-		if (l2vpn_svc) {
-			esi_to_str(&l2vpn_svc->esi, buf, ESI_STR_LEN);
-			if (memcmp(&l2vpn_svc->esi, &zpw->esi, sizeof(esi_t))) {
-				esi_to_str(&l2vpn_svc->esi, buf2, ESI_STR_LEN);
-				snprintf(errmsg, sizeof(errmsg), "ESI changed from %s to %s", buf,
-					 buf2);
-				withdraw_needed = true;
+		if (!l2vpn_svc)
+			continue;
+
+		if (l2vpn_svc->local_status != zpw->status) {
+			if (BGP_DEBUG(evpn, EVPN_VPWS))
+				zlog_debug("VPWS local-ac %u remote-ac %u, switch status from %s to %s",
+					   l2vpn_svc->local_ac_id, l2vpn_svc->remote_ac_id,
+					   evpn_status_to_str(l2vpn_svc->local_status),
+					   evpn_status_to_str(zpw->status));
+		}
+
+		/* handle AC interface switching */
+		if (memcmp(l2vpn_svc->local_ac, zpw->local_ac, IFNAMSIZ)) {
+			if (BGP_DEBUG(evpn, EVPN_VPWS))
+				zlog_debug("VPWS local-ac %u remote-ac %u, new interface AC %s",
+					   l2vpn_svc->local_ac_id, l2vpn_svc->remote_ac_id,
+					   zpw->local_ac);
+			/* AC ready to AC no ready */
+			if (l2vpn_svc->local_status != EVPN_LOCAL_TX_FAULT &&
+			    zpw->status == EVPN_LOCAL_TX_FAULT) {
+				if (!memcmp(&l2vpn_svc->esi, zero_esi, sizeof(esi_t))) {
+					ifp = if_lookup_by_name(l2vpn_svc->local_ac, bgp->vrf_id);
+					if (ifp) {
+						binfo = ifp->info;
+						UNSET_FLAG(binfo->flags, BGP_INTERFACE_EVPN_SINGLE_HOMED);
+					}
+				}
 				update_needed = true;
 			}
+			strlcpy(l2vpn_svc->local_ac, zpw->local_ac, IFNAMSIZ);
+		}
 
-			if (l2vpn_svc->local_status != zpw->status) {
-				snprintf(errmsg, sizeof(errmsg), "switch status from %s to %s",
-					 pw_status_to_str(l2vpn_svc->local_status),
-					 pw_status_to_str(zpw->status));
-				if (zpw->status == PW_FORWARDING)
-					update_needed = true;
-				else
-					withdraw_needed = true;
-			}
+		/* run VPWS EVPN_LOCAL_TX_FAULT -> EVPN_NOT_FORWARDING */
+		if (l2vpn_svc->local_status == EVPN_LOCAL_TX_FAULT &&
+		    zpw->status == EVPN_NOT_FORWARDING)
+			update_needed = true;
 
-			if ((update_needed || withdraw_needed) && BGP_DEBUG(evpn, EVPN_VPWS))
-				zlog_debug("%s: VPWS local-ac %u, remote-ac %u withdraw %sneeded, update %sneeded, reason: %s",
-					   __func__, l2vpn_svc->local_ac_id, l2vpn_pw->remote_ac_id,
-					   withdraw_needed ? "" : "not ",
-					   update_needed ? "" : "not ", errmsg);
-			if (withdraw_needed) {
-				/* send withdraw RT1 with old ESI */
-				bgp = bgp_get_evpn();
-				vpn = bgp_evpn_lookup_vni(bgp, l2vpn_svc>vni);
+		l2vpn_svc->local_status = zpw->status;
+		if (update_needed) {
+			/* send eventual withdraw RT1 */
+			if (CHECK_FLAG(l2vpn_svc->flags, F_EVPN_SEND_REMOTE)) {
+				vpn = bgp_evpn_lookup_vni(bgp, l2vpn_svc->vni);
 				bgp_l2vpn_vpws_local_withdraw(bgp, l2vpn_svc, vpn);
 			}
 
-			memcpy(&l2vpn_svc->esi, &zpw->esi, sizeof(esi_t));
-			strlcpy(l2vpn_svc->local_ac, zpw->local_ac, IFNAMSIZ);
-			l2vpn_svc->local_status = zpw->status;
-
-			if (update_needed && l2vpn_svc->local_status != PW_LOCAL_TX_FAULT)
-				/* send update RT1 */
-				bgp_l2vpn_vpws_run(l2vpn_svc);
+			/* send update RT1 */
+			bgp_l2vpn_vpws_run(l2vpn_svc);
 		}
 	}
 }
