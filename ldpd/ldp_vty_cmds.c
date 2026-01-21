@@ -569,7 +569,7 @@ DEFPY  (ldp_show_mpls_ldp_igp_sync,
 
 DEFPY  (ldp_show_l2vpn_atom_binding,
 	ldp_show_l2vpn_atom_binding_cmd,
-	"show l2vpn atom binding\
+	"show ldp l2vpn atom binding\
 	  [{\
 	    A.B.C.D$peer\
 	    |local-label (16-1048575)$local_label\
@@ -577,6 +577,7 @@ DEFPY  (ldp_show_l2vpn_atom_binding,
 	  }]\
 	 [json]$json",
 	"Show running system information\n"
+	"Show information about LDP\n"
 	"Show information about Layer2 VPN\n"
 	"Show Any Transport over MPLS information\n"
 	"Show AToM label binding information\n"
@@ -597,7 +598,7 @@ DEFPY  (ldp_show_l2vpn_atom_binding,
 
 DEFPY  (ldp_show_l2vpn_atom_vc,
 	ldp_show_l2vpn_atom_vc_cmd,
-	"show l2vpn atom vc\
+	"show ldp l2vpn atom vc\
 	  [{\
 	    A.B.C.D$peer\
 	    |interface IFNAME$ifname\
@@ -605,6 +606,7 @@ DEFPY  (ldp_show_l2vpn_atom_vc,
 	  }]\
 	 [json]$json",
 	"Show running system information\n"
+	"Show information about LDP\n"
 	"Show information about Layer2 VPN\n"
 	"Show Any Transport over MPLS information\n"
 	"Show AToM virtual circuit information\n"
