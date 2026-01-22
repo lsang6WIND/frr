@@ -1996,7 +1996,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		if_delete_update(&ifp);
 		if (zif_slave_type == ZEBRA_IF_SLAVE_BRIDGE)
 			/* call L2VPN to inform an AC may have been suppressed */
-			zebra_l2vpn_ac_updated(ifp);
+			zebra_l2vpn_ac_updated(ifp, IFINDEX_INTERNAL);
 
 		if (zif_type == ZEBRA_IF_VRF && !vrf_is_backend_netns())
 			interface_vrf_change(op, ifindex, name, tableid, ns_id);
@@ -2283,7 +2283,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 				zebra_l2if_update_bond(ifp, true);
 			if (IS_ZEBRA_IF_BRIDGE_SLAVE(ifp) && was_bridge_slave && mtu_changed)
 				/* call L2VPN to inform an AC may have the mtu changed */
-				zebra_l2vpn_ac_updated(ifp);
+				zebra_l2vpn_ac_updated(ifp, IFINDEX_INTERNAL);
 			if (IS_ZEBRA_IF_BRIDGE_SLAVE(ifp) || was_bridge_slave)
 				zebra_l2if_update_bridge_slave(
 					ifp, bridge_ifindex, ns_id, chgflags);

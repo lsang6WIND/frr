@@ -279,7 +279,7 @@ static void zebra_l2vpn_svc_update_status(struct zebra_l2vpn_svc *svc, int statu
  * - mtu of vxlan or AC changed
  * - AC attached or detached
  */
-void zebra_l2vpn_ac_updated(struct interface *ifp)
+void zebra_l2vpn_ac_updated(struct interface *ifp, ifindex_t old_bridge_ifindex)
 {
 	struct vrf *vrf;
 	struct zebra_vrf *zvrf;
@@ -343,17 +343,17 @@ void zebra_l2vpn_ac_updated(struct interface *ifp)
 					svc->data.bgp.mtu = mtu;
 				}
 				zebra_l2vpn_svc_update_status(svc, svc->status);
-				return;
-			}
-			if (zif_slave_type == ZEBRA_IF_SLAVE_NONE &&
-			    0 == strcmp(svc->data.bgp.local_ac, ifp->name)) {
-				/* - interface detached */
-				if (IS_ZEBRA_DEBUG_PW)
-					zlog_debug("VPWS VXLAN: AC %s detached from VNI %u",
-						   ifp->name, svc->data.bgp.vni);
-				memset(&svc->data.bgp.local_ac, 0, IFNAMSIZ);
-				zebra_l2vpn_svc_update_status(svc, EVPN_NOT_FORWARDING);
-				return;
+			} else if (zif_slave_type == ZEBRA_IF_SLAVE_NONE) {
+				/* local AC interface detached */
+				if (!strcmp(svc->data.bgp.local_ac, ifp->name)) {
+					if (IS_ZEBRA_DEBUG_PW)
+						zlog_debug("VPWS VXLAN: AC %s detached from VNI %u",
+							   ifp->name, svc->data.bgp.vni);
+
+					memset(&svc->data.bgp.local_ac, 0, IFNAMSIZ);
+					zebra_l2vpn_svc_update_status(svc, EVPN_LOCAL_TX_FAULT);
+				} else if (old_bridge_ifindex == br_if->ifindex)
+					zebra_evpn_bgp_vni_check(svc);
 			}
 		}
 	}
