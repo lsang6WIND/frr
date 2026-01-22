@@ -78,6 +78,8 @@ def setup_module(mod):
     host1 = tgen.gears["host1"]
     host2 = tgen.gears["host2"]
 
+    pe1.run("ip link add name lo1 type dummy")
+    pe1.run("ip link set up dev lo1")
     pe1.run("ip link add name br101 type bridge stp_state 0")
     pe1.run("ip addr add 10.10.1.1/24 dev br101")
     pe1.run("ip link set dev br101 up")
@@ -323,6 +325,58 @@ def test_mtu():
     res = check_show_l2vpn_vpws(pe2, "test", EVI, f"{AC_PE2}/{AC_PE1}", "vxlan101",
                                 "BGP", "Up")
     assert res is True, res
+
+
+def test_setup_changes():
+    "Check zebra is enable to detect EVPN VPWS VXLAN setup changes"
+
+    tgen = get_topogen()
+    pe1 = tgen.gears["PE1"]
+    pe2 = tgen.gears["PE2"]
+
+    logger.info("PE1: deattach AC interface (PE1-eth0) from the SVI")
+    pe1.run("ip link set nomaster PE1-eth0")
+    logger.info("Checking EVPN VPWS status is Down")
+    res = check_show_l2vpn_vpws(pe1, "test", EVI, f"{AC_PE1}/{AC_PE2}", "vxlan101",
+                                "BGP", "Down")
+    assert res is True, res
+    res = check_show_l2vpn_vpws(pe2, "test", EVI, f"{AC_PE2}/{AC_PE1}", "vxlan101",
+                                "BGP", "Down")
+    assert res is True, res
+
+    logger.info("PE1: attach AC interface (PE1-eth0) to the SVI")
+    pe1.run("ip link set master br101 PE1-eth0")
+    logger.info("Checking EVPN VPWS status is Up")
+    res = check_show_l2vpn_vpws(pe1, "test", EVI, f"{AC_PE1}/{AC_PE2}", "vxlan101",
+                                "BGP", "Up")
+    assert res is True, res
+    res = check_show_l2vpn_vpws(pe2, "test", EVI, f"{AC_PE2}/{AC_PE1}", "vxlan101",
+                                "BGP", "Up")
+    assert res is True, res
+
+    logger.info("PE1: attach lo1 interface to the SVI")
+    pe1.run("ip link set master br101 dev lo1")
+    res = check_show_l2vpn_vpws(pe1, "test", EVI, f"{AC_PE1}/{AC_PE2}", "vxlan101",
+                                "BGP", "Down")
+    assert res is True, res
+    logger.info("Checking EVPN VPWS status is Down")
+    res = check_show_l2vpn_vpws(pe2, "test", EVI, f"{AC_PE2}/{AC_PE1}", "vxlan101",
+                                "BGP", "Down")
+    assert res is True, res
+
+    logger.info("PE1: deattach lo1 interface from the SVI")
+    pe1.run("ip link set nomaster dev lo1")
+    logger.info("Checking EVPN VPWS status is Up")
+    res = check_show_l2vpn_vpws(pe1, "test", EVI, f"{AC_PE1}/{AC_PE2}", "vxlan101",
+                                "BGP", "Up")
+    assert res is True, res
+    res = check_show_l2vpn_vpws(pe2, "test", EVI, f"{AC_PE2}/{AC_PE1}", "vxlan101",
+                                "BGP", "Up")
+    assert res is True, res
+
+    logger.info("Checking EVPN VPWS dataplane")
+    check_ping("host1", "10.10.1.56", True, 10, 3)
+    check_ping("host2", "10.10.1.55", True, 10, 3)
 
 
 def _memory_leak():
