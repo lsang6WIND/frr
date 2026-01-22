@@ -342,9 +342,22 @@ static void bgp_l2vpn_vpws_run(struct l2vpn_svc *l2vpn_svc)
 			return;
 		}
 		es_evi_vtep = listgetdata(listhead(evi_match->es_evi_vtep_list));
+		memcpy(&l2vpn_svc->remote_mtu, es_evi_vtep->eval_l2attr.val + 4, 2);
+		l2vpn_svc->remote_mtu = ntohs(l2vpn_svc->remote_mtu);
+		if (l2vpn_svc->remote_mtu != l2vpn_svc->mtu) {
+			zlog_info("EVPN VPWS: remote EVI %u, mtu mismatch remote %u local %u",
+				  l2vpn_svc->evi, l2vpn_svc->remote_mtu, l2vpn_svc->mtu);
+
+			if (!l2vpn_svc->ignore_mtu_mismatch) {
+				l2vpn_svc->remote_status = EVPN_NOT_FORWARDING;
+				l2vpn_svc->reason = F_L2VPN_MTU_MISMATCH;
+
+				return;
+			}
+		}
 	} else {
 		for (ALL_LIST_ELEMENTS_RO(evi_match->es_evi_vtep_list, node, es_evi_vtep)) {
-			/* TODO  MH */
+			/* TODO MH: find the P flag across es_evi_vtep*/
 		}
 	}
 

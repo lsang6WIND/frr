@@ -227,6 +227,7 @@ struct bgp_evpn_es_evi {
 #define BGP_EVPNES_EVI_INCONS_VTEP_LIST (1 << 2)
 
 	uint32_t eth_tag;
+	/* local es_evi l2attr ecommunity */
 	struct ecommunity_val l2attr;
 	/* memory used for adding the es_evi to es_evi->vpn->es_evi_rb_tree */
 	RB_ENTRY(bgp_evpn_es_evi) rb_node;
@@ -266,6 +267,8 @@ struct bgp_evpn_es_evi_vtep {
 #define BGP_EVPN_EVI_VTEP_EAD         (BGP_EVPN_EVI_VTEP_EAD_PER_ES |\
 		BGP_EVPN_EVI_VTEP_EAD_PER_EVI)
 
+	/* remote es_evi l2attr ecommunity */
+	struct ecommunity_val eval_l2attr;
 	/* memory used for adding the entry to es_evi->es_evi_vtep_list */
 	struct listnode es_evi_listnode;
 	struct bgp_evpn_es_vtep *es_vtep;

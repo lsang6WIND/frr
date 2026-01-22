@@ -3435,7 +3435,8 @@ static int bgp_evpn_es_evi_vtep_cmp(void *p1, void *p2)
 }
 
 static struct bgp_evpn_es_evi_vtep *bgp_evpn_es_evi_vtep_new(
-		struct bgp_evpn_es_evi *es_evi, struct in_addr vtep_ip)
+		struct bgp_evpn_es_evi *es_evi, struct in_addr vtep_ip,
+		struct ecommunity_val *eval_l2)
 {
 	struct bgp_evpn_es_evi_vtep *evi_vtep;
 
@@ -3443,6 +3444,10 @@ static struct bgp_evpn_es_evi_vtep *bgp_evpn_es_evi_vtep_new(
 
 	evi_vtep->es_evi = es_evi;
 	evi_vtep->vtep_ip.s_addr = vtep_ip.s_addr;
+	if (eval_l2)
+		memcpy(&evi_vtep->eval_l2attr, eval_l2, ECOMMUNITY_SIZE);
+	else
+		memset(&evi_vtep->eval_l2attr, 0, ECOMMUNITY_SIZE);
 	listnode_init(&evi_vtep->es_evi_listnode, evi_vtep);
 	listnode_add_sort(es_evi->es_evi_vtep_list, &evi_vtep->es_evi_listnode);
 
@@ -3536,14 +3541,18 @@ bgp_evpn_es_evi_vtep_re_eval_active(struct bgp *bgp,
 
 static enum zclient_send_status
 bgp_evpn_es_evi_vtep_add(struct bgp *bgp, struct bgp_evpn_es_evi *es_evi,
-			 struct in_addr vtep_ip, bool ead_es)
+			 struct in_addr vtep_ip, struct ecommunity_val *eval_l2,
+			 bool ead_es)
 {
 	struct bgp_evpn_es_evi_vtep *evi_vtep;
 
 	evi_vtep = bgp_evpn_es_evi_vtep_find(es_evi, vtep_ip);
 
 	if (!evi_vtep)
-		evi_vtep = bgp_evpn_es_evi_vtep_new(es_evi, vtep_ip);
+		evi_vtep = bgp_evpn_es_evi_vtep_new(es_evi, vtep_ip, ead_es ?
+						    NULL : eval_l2);
+	else if (eval_l2)
+		memcpy(&evi_vtep->eval_l2attr, eval_l2, ECOMMUNITY_SIZE);
 
 	if (BGP_DEBUG(evpn, EVPN_MH_ES))
 		zlog_debug("add es %s evi %u vtep %pI4 %s",
@@ -3955,8 +3964,10 @@ enum zclient_send_status bgp_evpn_remote_es_evi_add(struct bgp *bgp,
 		es_evi = bgp_evpn_es_evi_new(es, vpn, eth_tag);
 
 	ead_es = p->prefix.ead_addr.eth_tag == BGP_EVPN_AD_ES_ETH_TAG;
+	eval_l2 = ecommunity_lookup(bgp_attr_get_ecommunity(pi->attr),
+				    ECOMMUNITY_ENCODE_EVPN, ECOMMUNITY_EVPN_SUBTYPE_LAYER2_ATTR);
 	ret = bgp_evpn_es_evi_vtep_add(bgp, es_evi,
-				       p->prefix.ead_addr.ip.ipaddr_v4, ead_es);
+				       p->prefix.ead_addr.ip.ipaddr_v4, eval_l2, ead_es);
 
 	bgp_evpn_es_evi_remote_info_re_eval(es_evi);
 
@@ -3985,9 +3996,6 @@ enum zclient_send_status bgp_evpn_remote_es_evi_add(struct bgp *bgp,
 				}
 			}
 
-			eval_l2 = ecommunity_lookup(bgp_attr_get_ecommunity(pi->attr),
-						 ECOMMUNITY_ENCODE_EVPN,
-						 ECOMMUNITY_EVPN_SUBTYPE_LAYER2_ATTR);
 			if (eval_l2) {
 				memcpy(&evpn_vpws->remote_mtu, eval_l2->val + 4, 2);
 				evpn_vpws->remote_mtu = ntohs(evpn_vpws->remote_mtu);
