@@ -369,9 +369,11 @@ static int l2vpn_instance_member_pseudowire_destroy(struct nb_cb_destroy_args *a
 		else
 			RB_REMOVE(l2vpn_svc_head, &l2vpn->svc_tree, pw);
 
+		pw->lsr_id.s_addr = INADDR_ANY;
 		if (l2vpn_lib_master.event_hook)
 			(*l2vpn_lib_master.event_hook)(pw);
 
+		RB_REMOVE(l2vpn_svc_head, &l2vpn->svc_inactive_tree, pw);
 		free(pw);
 		break;
 	}
