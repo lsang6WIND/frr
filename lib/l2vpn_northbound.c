@@ -254,14 +254,11 @@ static int l2vpn_instance_member_interface_create(struct nb_cb_create_args *args
 	case NB_EV_APPLY:
 		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
 		lif = l2vpn_if_find(l2vpn, ifname);
-		if (lif) {
-			nb_running_set_entry(args->dnode, lif);
+		if (lif)
 			return NB_OK;
-		}
 		lif = l2vpn_if_new(l2vpn, ifname);
 		RB_INSERT(l2vpn_if_head, &l2vpn->if_tree, lif);
 		QOBJ_REG(lif, l2vpn_if);
-		nb_running_set_entry(args->dnode, lif);
 
 		if (l2vpn_lib_master.event_hook)
 			(*l2vpn_lib_master.event_hook)(l2vpn->name);
@@ -273,6 +270,7 @@ static int l2vpn_instance_member_interface_create(struct nb_cb_create_args *args
 
 static int l2vpn_instance_member_interface_destroy(struct nb_cb_destroy_args *args)
 {
+	const char *ifname;
 	struct l2vpn *l2vpn;
 	struct l2vpn_if *lif;
 
@@ -283,8 +281,9 @@ static int l2vpn_instance_member_interface_destroy(struct nb_cb_destroy_args *ar
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
+		ifname = yang_dnode_get_string(args->dnode, "interface");
 		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
-		lif = nb_running_unset_entry(args->dnode);
+		lif = l2vpn_if_find(l2vpn, ifname);
 		if (!lif)
 			return NB_OK;
 
