@@ -11,6 +11,7 @@ extern void bgp_l2vpn_svc_update_status(struct zapi_pw_status *zpw);
 extern bool bgp_evpn_vpws_vni_changed(struct bgp *bgp, struct bgpevpn *vpn,
 				      vrf_id_t tenant_vrf_id);
 extern uint32_t bgp_evpn_vpws_vni_del(struct bgp *bgp, struct bgpevpn *vpn);
+extern uint32_t bgp_l2vpn_vpws_es_add(esi_t esi);
 struct zebra_pw;
 extern void bgp_l2vpn_vpws_zebra_set(struct bgp *bgp, struct l2vpn_svc *l2vpn_svc, bool on);
 extern void bgp_l2vpn_ifp_up(struct interface *ifp, bool up);

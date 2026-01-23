@@ -385,6 +385,27 @@ struct l2vpn_svc *bgp_l2vpn_vpws_evi_match(uint32_t ethtag)
 	return NULL;
 }
 
+uint32_t bgp_l2vpn_vpws_es_add(esi_t esi)
+{
+	uint32_t count = 0;
+	struct l2vpn *l2vpn;
+	struct l2vpn_svc *l2vpn_svc;
+
+	RB_FOREACH (l2vpn, l2vpn_head, &l2vpn_tree_config) {
+		if (l2vpn->type != L2VPN_TYPE_VPWS)
+			continue;
+
+		RB_FOREACH (l2vpn_svc, l2vpn_svc_head, &l2vpn->svc_tree) {
+			if (!memcmp(&l2vpn_svc->esi, &esi, sizeof(esi_t))) {
+				bgp_l2vpn_vpws_run(l2vpn_svc);
+				count++;
+			}
+		}
+	}
+
+	return count;
+}
+
 bool bgp_evpn_vpws_vni_changed(struct bgp *bgp, struct bgpevpn *vpn,
 			       vrf_id_t tenant_vrf_id)
 {
