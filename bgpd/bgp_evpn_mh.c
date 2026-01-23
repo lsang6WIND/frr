@@ -3996,7 +3996,15 @@ enum zclient_send_status bgp_evpn_remote_es_evi_add(struct bgp *bgp,
 				}
 			}
 
-			if (eval_l2) {
+			/* Signle-homed */
+			if (!memcmp(&evpn_vpws->esi, zero_esi, sizeof(esi_t))) {
+				if (listcount(es_evi->es_evi_vtep_list) > 1 ||
+				    !eval_l2) {
+					evpn_vpws->reason = F_L2VPN_AD_MISMATCH;
+
+					return ret;
+				}
+
 				memcpy(&evpn_vpws->remote_mtu, eval_l2->val + 4, 2);
 				evpn_vpws->remote_mtu = ntohs(evpn_vpws->remote_mtu);
 				if (evpn_vpws->remote_mtu != evpn_vpws->mtu) {
@@ -4009,10 +4017,11 @@ enum zclient_send_status bgp_evpn_remote_es_evi_add(struct bgp *bgp,
 
 						return ret;
 					}
-
 				}
-				/* TODO MH */
+			} else {
+				/* TODO MH: Find P flag across es_evi_vtep_list */
 			}
+
 			IPV4_ADDR_COPY(&evpn_vpws->addr.ipv4, &p->prefix.ead_addr.ip.ipaddr_v4);
 			IPV4_ADDR_COPY(&evpn_vpws->lsr_id, &pi->peer->remote_id);
 
