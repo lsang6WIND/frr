@@ -2440,7 +2440,7 @@ done:
  * the above transition.
  * L3VNI add/delete is handled by the calling functions.
  */
-static int zebra_vxlan_handle_vni_transition(struct zebra_vrf *zvrf, vni_t vni,
+int zebra_vxlan_handle_vni_transition(struct zebra_vrf *zvrf, vni_t vni,
 					     int add)
 {
 	struct zebra_evpn *zevpn = NULL;
