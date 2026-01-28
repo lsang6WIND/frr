@@ -255,7 +255,7 @@ static int l2vpn_instance_member_interface_create(struct nb_cb_create_args *args
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(args->dnode, NULL, true);
 		lif = l2vpn_if_find(l2vpn, ifname);
 		if (lif)
 			return NB_OK;
@@ -285,7 +285,7 @@ static int l2vpn_instance_member_interface_destroy(struct nb_cb_destroy_args *ar
 		break;
 	case NB_EV_APPLY:
 		ifname = yang_dnode_get_string(args->dnode, "interface");
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(args->dnode, NULL, true);
 		lif = l2vpn_if_find(l2vpn, ifname);
 		if (!lif)
 			return NB_OK;
@@ -325,7 +325,7 @@ static int l2vpn_instance_member_pseudowire_create(struct nb_cb_create_args *arg
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(lyd_parent(args->dnode), NULL, true);
 		pw = l2vpn_svc_find(l2vpn, ifname);
 		if (pw) {
 			nb_running_set_entry(args->dnode, pw);
@@ -358,7 +358,7 @@ static int l2vpn_instance_member_pseudowire_destroy(struct nb_cb_destroy_args *a
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(lyd_parent(args->dnode), NULL, true);
 		pw = nb_running_unset_entry(args->dnode);
 		if (!pw)
 			return NB_OK;
@@ -625,7 +625,7 @@ static int l2vpn_instance_member_evpn_create(struct nb_cb_create_args *args)
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(lyd_parent(args->dnode), NULL, true);
 		svc = l2vpn_svc_find(l2vpn, ifname);
 		if (svc) {
 			nb_running_set_entry(args->dnode, svc);
@@ -657,7 +657,7 @@ static int l2vpn_instance_member_evpn_destroy(struct nb_cb_destroy_args *args)
 		/* NOTHING */
 		break;
 	case NB_EV_APPLY:
-		l2vpn = nb_running_get_entry(args->dnode, "../.", true);
+		l2vpn = nb_running_get_entry(lyd_parent(args->dnode), NULL, true);
 		svc = nb_running_unset_entry(args->dnode);
 		if (!svc)
 			return NB_OK;
