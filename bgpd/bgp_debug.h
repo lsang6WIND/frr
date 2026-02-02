@@ -68,7 +68,7 @@ extern unsigned long conf_bgp_debug_flowspec;
 extern unsigned long conf_bgp_debug_labelpool;
 extern unsigned long conf_bgp_debug_pbr;
 extern unsigned long conf_bgp_debug_graceful_restart;
-extern unsigned long conf_bgp_debug_evpn_mh;
+extern unsigned long conf_bgp_debug_evpn;
 extern unsigned long conf_bgp_debug_bfd;
 extern unsigned long conf_bgp_debug_cond_adv;
 extern unsigned long conf_bgp_debug_aggregate;
@@ -87,7 +87,7 @@ extern unsigned long term_bgp_debug_flowspec;
 extern unsigned long term_bgp_debug_labelpool;
 extern unsigned long term_bgp_debug_pbr;
 extern unsigned long term_bgp_debug_graceful_restart;
-extern unsigned long term_bgp_debug_evpn_mh;
+extern unsigned long term_bgp_debug_evpn;
 extern unsigned long term_bgp_debug_bfd;
 extern unsigned long term_bgp_debug_cond_adv;
 extern unsigned long term_bgp_debug_aggregate;
@@ -134,6 +134,7 @@ struct bgp_debug_filter {
 #define BGP_DEBUG_PBR_ERROR           0x02
 #define BGP_DEBUG_EVPN_MH_ES          0x01
 #define BGP_DEBUG_EVPN_MH_RT          0x02
+#define BGP_DEBUG_EVPN_VPWS           0x04
 
 #define BGP_DEBUG_GRACEFUL_RESTART     0x01
 

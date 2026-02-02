@@ -66,7 +66,7 @@ void bgp_nhg_init(void)
 	bf_init(bgp_nh_id_bitmap, id_max);
 	bf_assign_zero_index(bgp_nh_id_bitmap);
 
-	if (BGP_DEBUG(nht, NHT) || BGP_DEBUG(evpn_mh, EVPN_MH_ES))
+	if (BGP_DEBUG(nht, NHT) || BGP_DEBUG(evpn, EVPN_MH_ES))
 		zlog_debug("bgp nhg range %u - %u", bgp_nhg_start + 1,
 			   bgp_nhg_start + id_max);
 }

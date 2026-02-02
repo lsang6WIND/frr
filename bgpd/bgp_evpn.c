@@ -1448,7 +1448,7 @@ static void evpn_delete_old_local_route(struct bgp *bgp, struct bgpevpn *vpn,
 	afi_t afi = AFI_L2VPN;
 	safi_t safi = SAFI_EVPN;
 
-	if (BGP_DEBUG(evpn_mh, EVPN_MH_RT)) {
+	if (BGP_DEBUG(evpn, EVPN_MH_RT)) {
 		char esi_buf[ESI_STR_LEN];
 		char esi_buf2[ESI_STR_LEN];
 		struct prefix_evpn *evp =
@@ -1984,7 +1984,7 @@ static void update_evpn_route_entry_sync_info(struct bgp *bgp,
 			else
 				UNSET_FLAG(attr->es_flags, ATTR_ES_PEER_ROUTER);
 
-			if (BGP_DEBUG(evpn_mh, EVPN_MH_RT)) {
+			if (BGP_DEBUG(evpn, EVPN_MH_RT)) {
 				char esi_buf[ESI_STR_LEN];
 
 				zlog_debug("setup sync info for %pFX es %s max_seq %d %s%s%s",
@@ -3404,7 +3404,7 @@ static int install_evpn_route_entry_in_vni_common(
 		    || memcmp(&pi->attr->esi, &attr_new->esi,
 			      sizeof(attr_new->esi))) {
 
-			if (BGP_DEBUG(evpn_mh, EVPN_MH_RT))
+			if (BGP_DEBUG(evpn, EVPN_MH_RT))
 				zlog_debug("VNI %d path %pFX chg to %s es",
 					   vpn->vni, &pi->net->rn->p,
 					   new_local_es ? "local" : "non-local");
@@ -3997,7 +3997,7 @@ bool bgp_evpn_skip_vrf_import_of_local_es(struct bgp *bgp_vrf, const struct pref
 
 		/* Don't import routes that point to a local destination */
 		if (bgp_evpn_attr_is_local_es(pi->attr)) {
-			if (BGP_DEBUG(evpn_mh, EVPN_MH_RT)) {
+			if (BGP_DEBUG(evpn, EVPN_MH_RT)) {
 				char esi_buf[ESI_STR_LEN];
 
 				zlog_debug(

@@ -58,10 +58,11 @@ unsigned long conf_bgp_debug_flowspec;
 unsigned long conf_bgp_debug_labelpool;
 unsigned long conf_bgp_debug_pbr;
 unsigned long conf_bgp_debug_graceful_restart;
-unsigned long conf_bgp_debug_evpn_mh;
+unsigned long conf_bgp_debug_evpn;
 unsigned long conf_bgp_debug_bfd;
 unsigned long conf_bgp_debug_cond_adv;
 unsigned long conf_bgp_debug_aggregate;
+unsigned long conf_bgp_debug_l2vpn;
 
 unsigned long term_bgp_debug_as4;
 unsigned long term_bgp_debug_neighbor_events;
@@ -79,7 +80,7 @@ unsigned long term_bgp_debug_flowspec;
 unsigned long term_bgp_debug_labelpool;
 unsigned long term_bgp_debug_pbr;
 unsigned long term_bgp_debug_graceful_restart;
-unsigned long term_bgp_debug_evpn_mh;
+unsigned long term_bgp_debug_evpn;
 unsigned long term_bgp_debug_bfd;
 unsigned long term_bgp_debug_cond_adv;
 unsigned long term_bgp_debug_aggregate;
@@ -2153,16 +2154,16 @@ DEFPY (debug_bgp_evpn_mh,
 	if (es) {
 		if (vty->node == CONFIG_NODE) {
 			if (no)
-				DEBUG_OFF(evpn_mh, EVPN_MH_ES);
+				DEBUG_OFF(evpn, EVPN_MH_ES);
 			else
-				DEBUG_ON(evpn_mh, EVPN_MH_ES);
+				DEBUG_ON(evpn, EVPN_MH_ES);
 		} else {
 			if (no) {
-				TERM_DEBUG_OFF(evpn_mh, EVPN_MH_ES);
+				TERM_DEBUG_OFF(evpn, EVPN_MH_ES);
 				vty_out(vty,
 					"BGP EVPN-MH ES debugging is off\n");
 			} else {
-				TERM_DEBUG_ON(evpn_mh, EVPN_MH_ES);
+				TERM_DEBUG_ON(evpn, EVPN_MH_ES);
 				vty_out(vty,
 					"BGP EVPN-MH ES debugging is on\n");
 			}
@@ -2171,16 +2172,16 @@ DEFPY (debug_bgp_evpn_mh,
 	if (rt) {
 		if (vty->node == CONFIG_NODE) {
 			if (no)
-				DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+				DEBUG_OFF(evpn, EVPN_MH_RT);
 			else
-				DEBUG_ON(evpn_mh, EVPN_MH_RT);
+				DEBUG_ON(evpn, EVPN_MH_RT);
 		} else {
 			if (no) {
-				TERM_DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+				TERM_DEBUG_OFF(evpn, EVPN_MH_RT);
 				vty_out(vty,
 					"BGP EVPN-MH route debugging is off\n");
 			} else {
-				TERM_DEBUG_ON(evpn_mh, EVPN_MH_RT);
+				TERM_DEBUG_ON(evpn, EVPN_MH_RT);
 				vty_out(vty,
 					"BGP EVPN-MH route debugging is on\n");
 			}
@@ -2285,6 +2286,35 @@ DEFPY (debug_bgp_cond_adv,
 	return CMD_SUCCESS;
 }
 
+DEFPY (debug_bgp_evpn_vpws,
+       debug_bgp_evpn_vpws_cmd,
+       "[no$no] debug bgp evpn vpws",
+       NO_STR
+       DEBUG_STR
+       BGP_STR
+       "BGP EVPN\n"
+       "Virtual Private Wire Service\n")
+{
+	if (vty->node == CONFIG_NODE) {
+		if (no)
+			DEBUG_OFF(evpn, EVPN_VPWS);
+		else
+			DEBUG_ON(evpn, EVPN_VPWS);
+	} else {
+		if (no) {
+			TERM_DEBUG_OFF(evpn, EVPN_VPWS);
+			vty_out(vty,
+				"BGP evpn vpws debugging is off\n");
+		} else {
+			TERM_DEBUG_ON(evpn, EVPN_VPWS);
+			vty_out(vty,
+				"BGP evpn vpws debugging is on\n");
+		}
+	}
+
+	return CMD_SUCCESS;
+}
+
 DEFUN (no_debug_bgp,
        no_debug_bgp_cmd,
        "no debug bgp",
@@ -2326,8 +2356,9 @@ DEFUN (no_debug_bgp,
 	TERM_DEBUG_OFF(pbr, PBR);
 	TERM_DEBUG_OFF(pbr, PBR_ERROR);
 	TERM_DEBUG_OFF(graceful_restart, GRACEFUL_RESTART);
-	TERM_DEBUG_OFF(evpn_mh, EVPN_MH_ES);
-	TERM_DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+	TERM_DEBUG_OFF(evpn, EVPN_MH_ES);
+	TERM_DEBUG_OFF(evpn, EVPN_MH_RT);
+	TERM_DEBUG_OFF(evpn, EVPN_VPWS);
 	TERM_DEBUG_OFF(bfd, BFD_LIB);
 	TERM_DEBUG_OFF(cond_adv, COND_ADV);
 
@@ -2418,9 +2449,9 @@ DEFUN_NOSH (show_debugging_bgp,
 	if (BGP_DEBUG(pbr, PBR_ERROR))
 		vty_out(vty, "  BGP policy based routing error debugging is on\n");
 
-	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
+	if (BGP_DEBUG(evpn, EVPN_MH_ES))
 		vty_out(vty, "  BGP EVPN-MH ES debugging is on\n");
-	if (BGP_DEBUG(evpn_mh, EVPN_MH_RT))
+	if (BGP_DEBUG(evpn, EVPN_MH_RT))
 		vty_out(vty, "  BGP EVPN-MH route debugging is on\n");
 
 	if (BGP_DEBUG(bfd, BFD_LIB))
@@ -2429,6 +2460,9 @@ DEFUN_NOSH (show_debugging_bgp,
 	if (BGP_DEBUG(cond_adv, COND_ADV))
 		vty_out(vty,
 			"  BGP conditional advertisement debugging is on\n");
+
+	if (BGP_DEBUG(evpn, EVPN_VPWS))
+		vty_out(vty, "BGP evpn vpws debugging is on\n");
 
 	cmd_show_lib_debugs(vty);
 
@@ -2554,11 +2588,11 @@ static int bgp_config_write_debug(struct vty *vty)
 		write++;
 	}
 
-	if (CONF_BGP_DEBUG(evpn_mh, EVPN_MH_ES)) {
+	if (CONF_BGP_DEBUG(evpn, EVPN_MH_ES)) {
 		vty_out(vty, "debug bgp evpn mh es\n");
 		write++;
 	}
-	if (CONF_BGP_DEBUG(evpn_mh, EVPN_MH_RT)) {
+	if (CONF_BGP_DEBUG(evpn, EVPN_MH_RT)) {
 		vty_out(vty, "debug bgp evpn mh route\n");
 		write++;
 	}
@@ -2570,6 +2604,11 @@ static int bgp_config_write_debug(struct vty *vty)
 
 	if (CONF_BGP_DEBUG(cond_adv, COND_ADV)) {
 		vty_out(vty, "debug bgp conditional-advertisement\n");
+		write++;
+	}
+
+	if (BGP_DEBUG(evpn, EVPN_VPWS)) {
+		vty_out(vty, "debug bgp evpn vpws \n");
 		write++;
 	}
 
@@ -2724,6 +2763,10 @@ void bgp_debug_init(void)
 
 	install_element(ENABLE_NODE, &debug_bgp_evpn_mh_cmd);
 	install_element(CONFIG_NODE, &debug_bgp_evpn_mh_cmd);
+
+	/* debug bgp evpn vpws */
+	install_element(ENABLE_NODE, &debug_bgp_evpn_vpws_cmd);
+	install_element(CONFIG_NODE, &debug_bgp_evpn_vpws_cmd);
 
 	/* debug bgp bfd */
 	install_element(ENABLE_NODE, &debug_bgp_bfd_cmd);
