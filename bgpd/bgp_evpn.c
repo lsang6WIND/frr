@@ -17,6 +17,7 @@
 #include "zclient.h"
 
 #include "lib/printfrr.h"
+#include "lib/l2vpn.h"
 
 #include "bgpd/bgp_attr_evpn.h"
 #include "bgpd/bgpd.h"
@@ -42,6 +43,7 @@
 #include "bgpd/bgp_trace.h"
 #include "bgpd/bgp_mpath.h"
 #include "bgpd/bgp_packet.h"
+#include "bgpd/bgp_l2vpn.h"
 
 /*
  * Definitions and external declarations.
@@ -1363,7 +1365,7 @@ enum zclient_send_status evpn_zebra_install(struct bgp *bgp, struct bgpevpn *vpn
 			&vtep_ip, 1, flags, seq,
 			bgp_evpn_attr_get_esi(pi->attr));
 	} else if (p->prefix.route_type == BGP_EVPN_AD_ROUTE) {
-		ret = bgp_evpn_remote_es_evi_add(bgp, vpn, p);
+		ret = bgp_evpn_remote_es_evi_add(bgp, vpn, p, pi);
 	} else {
 		switch (bgp_attr_get_pmsi_tnl_type(pi->attr)) {
 		case PMSI_TNLTYPE_INGR_REPL:
@@ -1425,7 +1427,7 @@ enum zclient_send_status evpn_zebra_uninstall(struct bgp *bgp,
 			(is_sync ? &zero_vtep_ip : &vtep_ip), 0, 0, 0,
 			NULL);
 	else if (p->prefix.route_type == BGP_EVPN_AD_ROUTE)
-		ret = bgp_evpn_remote_es_evi_del(bgp, vpn, p);
+		ret = bgp_evpn_remote_es_evi_del(bgp, vpn, p, pi);
 	else
 		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p,
 						 VXLAN_FLOOD_DISABLED, 0);
@@ -2977,7 +2979,7 @@ static void update_routes_for_vni_hash(struct hash_bucket *bucket,
  * the per-VNI table. Invoked upon the VNI being deleted or EVPN
  * (advertise-all-vni) being disabled.
  */
-static int delete_routes_for_vni(struct bgp *bgp, struct bgpevpn *vpn)
+int delete_routes_for_vni(struct bgp *bgp, struct bgpevpn *vpn)
 {
 	int ret;
 	struct prefix_evpn p;
@@ -7088,6 +7090,9 @@ int bgp_evpn_local_macip_del(struct bgp *bgp, vni_t vni, struct ethaddr *mac,
 		return -1;
 	}
 
+	if (CHECK_FLAG(vpn->flags, VNI_FLAG_VPWS))
+		return 0;
+
 	build_evpn_type2_prefix(&p, mac, ip);
 	if (state == ZEBRA_NEIGH_ACTIVE) {
 		/* Remove EVPN type-2 route and schedule for processing. */
@@ -7121,6 +7126,9 @@ int bgp_evpn_local_macip_add(struct bgp *bgp, vni_t vni, struct ethaddr *mac,
 			  bgp->vrf_id, vni, vpn ? "not live" : "not found");
 		return -1;
 	}
+
+	if (CHECK_FLAG(vpn->flags, VNI_FLAG_VPWS))
+		return 0;
 
 	/* Create EVPN type-2 route and schedule for processing. */
 	build_evpn_type2_prefix(&p, mac, ip);

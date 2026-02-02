@@ -389,10 +389,10 @@ void l2vpn_cli_init(void)
 	cmd_variable_handler_register(l2vpn_var_handlers);
 	install_node(&l2vpn_node);
 	install_node(&l2vpn_pseudowire_node);
-	install_node(&l2vpn_pseudowire_evpn);
+	install_node(&l2vpn_evpn_node);
 	install_default(L2VPN_NODE);
 	install_default(L2VPN_PSEUDOWIRE_NODE);
-	install_default(L2VPN_PSEUDOWIRE_evpn);
+	install_default(L2VPN_EVPN_NODE);
 	install_element(CONFIG_NODE, &l2vpn_cmd);
 	install_element(CONFIG_NODE, &no_l2vpn_cmd);
 

@@ -115,6 +115,8 @@ struct l2vpn_svc *l2vpn_svc_new(struct l2vpn *l2vpn, const char *ifname)
 	svc = XCALLOC(MTYPE_l2vpn_svc, sizeof(*svc));
 
 	svc->l2vpn = l2vpn;
+	svc->ignore_mtu_mismatch = true;
+	svc->enabled = true;
 	strlcpy(svc->ifname, ifname, sizeof(svc->ifname));
 
 	return (svc);

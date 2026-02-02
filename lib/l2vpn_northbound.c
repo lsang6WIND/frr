@@ -10,7 +10,7 @@
 #include "lib/command.h"
 #include "lib/log.h"
 #include "lib/northbound.h"
-#include "lib/l2vpn.h"
+#include "lib/l2vpn_svc.h"
 
 /*
  * XPath: /frr-l2vpn:l2vpn/l2vpn-instance
@@ -926,6 +926,7 @@ static int l2vpn_instance_member_evpn_vni_modify(struct nb_cb_modify_args *args)
 			}
 		}
 
+		SET_FLAG(l2vpn_svc->flags, F_EVPN_VNI);
 		l2vpn_svc->vni = vni;
 		if (l2vpn_lib_master.event_hook)
 			(*l2vpn_lib_master.event_hook)(l2vpn_svc);
@@ -949,6 +950,7 @@ static int l2vpn_instance_member_evpn_vni_destroy(struct nb_cb_destroy_args *arg
 	case NB_EV_APPLY:
 		l2vpn_svc = nb_running_get_entry(args->dnode, NULL, true);
 		if (l2vpn_lib_master.event_hook) {
+				UNSET_FLAG(l2vpn_svc->flags, F_EVPN_VNI);
 				l2vpn_svc->enabled = false;
 				(*l2vpn_lib_master.event_hook)(l2vpn_svc);
 				l2vpn_svc->enabled = true;
