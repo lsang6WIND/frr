@@ -39,8 +39,8 @@ RB_HEAD(l2vpn_if_head, l2vpn_if);
 RB_PROTOTYPE(l2vpn_if_head, l2vpn_if, entry, l2vpn_if_compare);
 DECLARE_QOBJ_TYPE(l2vpn_if);
 
-struct l2vpn_pw {
-	RB_ENTRY(l2vpn_pw)	 entry;
+struct l2vpn_svc {
+	RB_ENTRY(l2vpn_svc)	 entry;
 	struct l2vpn		*l2vpn;
 	struct in_addr		 lsr_id;
 	int			 af;
@@ -58,9 +58,9 @@ struct l2vpn_pw {
 
 	QOBJ_FIELDS;
 };
-RB_HEAD(l2vpn_pw_head, l2vpn_pw);
-RB_PROTOTYPE(l2vpn_pw_head, l2vpn_pw, entry, l2vpn_pw_compare);
-DECLARE_QOBJ_TYPE(l2vpn_pw);
+RB_HEAD(l2vpn_svc_head, l2vpn_svc);
+RB_PROTOTYPE(l2vpn_svc_head, l2vpn_svc, entry, l2vpn_svc_compare);
+DECLARE_QOBJ_TYPE(l2vpn_svc);
 #define F_PW_STATUSTLV_CONF	0x01	/* status tlv configured */
 #define F_PW_STATUSTLV		0x02	/* status tlv negotiated */
 #define F_PW_CWORD_CONF		0x04	/* control word configured */
@@ -69,11 +69,11 @@ DECLARE_QOBJ_TYPE(l2vpn_pw);
 #define F_PW_SEND_REMOTE	0x20	/* send pw message to remote */
 
 
-#define F_PW_NO_ERR             0x00	/* no error reported */
-#define F_PW_LOCAL_NOT_FWD      0x01	/* locally can't forward over PW */
-#define F_PW_REMOTE_NOT_FWD     0x02	/* remote end of PW reported fwd error*/
-#define F_PW_NO_REMOTE_LABEL    0x03	/* have not recvd label from peer */
-#define F_PW_MTU_MISMATCH       0x04	/* mtu mismatch between peers */
+#define F_L2VPN_NO_ERR             0x00 /* no error reported */
+#define F_L2VPN_LOCAL_NOT_FWD      0x01 /* locally can't forward over PW */
+#define F_L2VPN_REMOTE_NOT_FWD     0x02 /* remote end of PW reported fwd error*/
+#define F_L2VPN_NO_REMOTE_LABEL    0x03 /* have not recvd label from peer */
+#define F_L2VPN_MTU_MISMATCH       0x04 /* mtu mismatch between peers */
 
 
 typedef enum { L2VPN_TYPE_VPWS = 1, L2VPN_TYPE_VPLS = 2 } l2vpn_types;
@@ -87,8 +87,8 @@ struct l2vpn {
 	char br_ifname[IFNAMSIZ];
 	ifindex_t		 br_ifindex;
 	struct l2vpn_if_head	 if_tree;
-	struct l2vpn_pw_head	 pw_tree;
-	struct l2vpn_pw_head	 pw_inactive_tree;
+	struct l2vpn_svc_head	 svc_tree;
+	struct l2vpn_svc_head	 svc_inactive_tree;
 
 	QOBJ_FIELDS;
 };
@@ -112,15 +112,15 @@ void l2vpn_del(struct l2vpn *l2vpn);
 struct l2vpn_if *l2vpn_if_new(struct l2vpn *l2vpn, const char *ifname);
 struct l2vpn_if *l2vpn_if_find(struct l2vpn *l2vpn, const char *ifname);
 
-struct l2vpn_pw *l2vpn_pw_new(struct l2vpn *l2vpn, const char *ifname);
-struct l2vpn_pw *l2vpn_pw_find(struct l2vpn *l2vpn, const char *ifname);
-struct l2vpn_pw *l2vpn_pw_find_active(struct l2vpn *l2vpn, const char *ifname);
-struct l2vpn_pw *l2vpn_pw_find_inactive(struct l2vpn *l2vpn, const char *ifname);
+struct l2vpn_svc *l2vpn_svc_new(struct l2vpn *l2vpn, const char *ifname);
+struct l2vpn_svc *l2vpn_svc_find(struct l2vpn *l2vpn, const char *ifname);
+struct l2vpn_svc *l2vpn_svc_find_active(struct l2vpn *l2vpn, const char *ifname);
+struct l2vpn_svc *l2vpn_svc_find_inactive(struct l2vpn *l2vpn, const char *ifname);
 
 struct l2vpn_lib_register {
 	void (*add_hook)(const char *name);
 	void (*del_hook)(const char *name);
-	void (*event_hook)(struct l2vpn_pw *l2vpn_pw);
+	void (*event_hook)(struct l2vpn_svc *l2vpn_svc);
 	bool (*iface_ok_for_l2vpn)(const char *ifname);
 };
 
@@ -130,7 +130,7 @@ extern struct l2vpn_head l2vpn_tree_config;
 int l2vpn_iface_is_configured(const char *ifname);
 
 void l2vpn_register_hook(void (*func_add)(const char *), void (*func_del)(const char *),
-			 void (*func_event)(struct l2vpn_pw *),
+			 void (*func_event)(struct l2vpn_svc *),
 			 bool (*func_iface_ok_for_l2vpn)(const char *));
 
 #ifdef __cplusplus

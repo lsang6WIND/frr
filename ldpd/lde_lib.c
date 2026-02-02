@@ -463,7 +463,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln, int rcvd_label_mapping)
 	struct fec_nh		*fnh;
 	struct lde_req		*lre;
 	struct lde_map		*me;
-	struct l2vpn_pw		*pw;
+	struct l2vpn_svc		*pw;
 	bool			 send_map = false;
 
 	lde_map2fec(map, ln->id, &fec);
@@ -496,7 +496,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln, int rcvd_label_mapping)
 		fn = fec_add(&fec);
 
 	if (fec.type == FEC_TYPE_PWID && rcvd_label_mapping) {
-		pw = (struct l2vpn_pw *)fn->data;
+		pw = (struct l2vpn_svc *)fn->data;
 		if (pw && !CHECK_FLAG(pw->flags, F_PW_SEND_REMOTE)) {
 			SET_FLAG(pw->flags, F_PW_SEND_REMOTE);
 			lde_send_labelmapping(ln, fn, 1);
@@ -570,7 +570,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln, int rcvd_label_mapping)
 				lde_send_change_klabel(fn, fnh);
 			break;
 		case FEC_TYPE_PWID:
-			pw = (struct l2vpn_pw *) fn->data;
+			pw = (struct l2vpn_svc *) fn->data;
 			if (pw == NULL)
 				continue;
 
@@ -812,7 +812,7 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 	struct fec_node		*fn;
 	struct fec_nh		*fnh;
 	struct lde_map		*me;
-	struct l2vpn_pw		*pw;
+	struct l2vpn_svc		*pw;
 	struct lde_nbr		*lnbr;
 
 	/* wildcard label withdraw */
@@ -829,7 +829,7 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 		fn = fec_add(&fec);
 
 	if (fec.type == FEC_TYPE_PWID) {
-		pw = (struct l2vpn_pw *)fn->data;
+		pw = (struct l2vpn_svc *)fn->data;
 		if (pw && CHECK_FLAG(pw->flags, F_PW_SEND_REMOTE)) {
 			UNSET_FLAG(pw->flags, F_PW_SEND_REMOTE);
 		}
@@ -844,7 +844,7 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 				continue;
 			break;
 		case FEC_TYPE_PWID:
-			pw = (struct l2vpn_pw *) fn->data;
+			pw = (struct l2vpn_svc *) fn->data;
 			if (pw == NULL)
 				continue;
 			pw->remote_status = PW_NOT_FORWARDING;
@@ -903,7 +903,7 @@ lde_check_withdraw_wcard(struct map *map, struct lde_nbr *ln)
 	struct fec_node	*fn;
 	struct fec_nh	*fnh;
 	struct lde_map	*me;
-	struct l2vpn_pw	*pw;
+	struct l2vpn_svc	*pw;
 	struct lde_nbr  *lnbr;
 
 	/* LWd.2: send label release */
@@ -927,7 +927,7 @@ lde_check_withdraw_wcard(struct map *map, struct lde_nbr *ln)
 			case FEC_TYPE_PWID:
 				if (f->u.pwid.lsr_id.s_addr != ln->id.s_addr)
 					continue;
-				pw = (struct l2vpn_pw *) fn->data;
+				pw = (struct l2vpn_svc *) fn->data;
 				if (pw)
 					pw->remote_status = PW_NOT_FORWARDING;
 				break;

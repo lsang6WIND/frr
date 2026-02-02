@@ -34,7 +34,7 @@ static void bgp_l2vpn_entry_deleted(const char *l2vpn_name)
  * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-address
  * XPath: /frr-l2vpn:l2vpn/l2vpn-instance/member-pseudowire/neighbor-lsr-id
  */
-static void bgp_l2vpn_entry_event(struct l2vpn_pw *l2vpn_pw)
+static void bgp_l2vpn_entry_event(struct l2vpn_svc *l2vpn_svc)
 {
 	/* XXX handle l2vpn changes */
 }
