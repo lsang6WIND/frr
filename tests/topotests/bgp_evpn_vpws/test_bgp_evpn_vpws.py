@@ -11,8 +11,16 @@ test_bgp_evpn_vxlan.py: Test EVPN VPWS VXLAN port-based single-homed.
       |     |   |     |   |    |   |     |   |     |
       |HOST1+---+ PE1 +---+ P1 +---+ PE2 +---+HOST2|
       |     |   |     |   |    |   |     |   |     |
-      +-----+   +-----+   +----+   +-----+   +-----+
+      +-----+   +--+--+   +----+   +--+--+   +-----+
+                   |                  |
+                   |                  |
+                +--+--+            +--+--+
+                |     |            |     |
+                |HOST3|            |HOST4|
+                |     |            |     |
+                +-----+            +-----+
 """
+
 
 import os
 import sys
@@ -45,6 +53,8 @@ def build_topo(tgen):
     tgen.add_router("PE2")
     tgen.add_router("host1")
     tgen.add_router("host2")
+    tgen.add_router("host3")
+    tgen.add_router("host4")
 
     # Host1-PE1
     switch = tgen.add_switch("s1")
@@ -66,6 +76,15 @@ def build_topo(tgen):
     switch.add_link(tgen.gears["PE2"])
     switch.add_link(tgen.gears["host2"])
 
+     #Host3-PE1
+    switch = tgen.add_switch("s5")
+    switch.add_link(tgen.gears["host3"])
+    switch.add_link(tgen.gears["PE1"])
+
+     #Host4-PE2
+    switch = tgen.add_switch("s6")
+    switch.add_link(tgen.gears["host4"])
+    switch.add_link(tgen.gears["PE2"])
 
 def setup_module(mod):
     "Sets up the pytest environment"
@@ -77,9 +96,13 @@ def setup_module(mod):
     p1 = tgen.gears["P1"]
     host1 = tgen.gears["host1"]
     host2 = tgen.gears["host2"]
+    host3 = tgen.gears["host3"]
+    host4 = tgen.gears["host4"]
 
     pe1.run("ip link add name lo1 type dummy")
     pe1.run("ip link set up dev lo1")
+    p1.run("sysctl -w net.ipv4.ip_forward=1")
+    # setup EVPWS VPWS VXLAN VNI 101
     pe1.run("ip link add name br101 type bridge stp_state 0")
     pe1.run("ip addr add 10.10.1.1/24 dev br101")
     pe1.run("ip link set dev br101 up")
@@ -103,7 +126,31 @@ def setup_module(mod):
     pe2.run("ip link set up dev vxlan101")
     pe2.run("ip link set dev PE2-eth1 master br101")
     pe2.run("ip link set dev PE2-eth1 type bridge_slave neigh_suppress on learning off")
-    p1.run("sysctl -w net.ipv4.ip_forward=1")
+
+    # setup EVPWS VPWS VXLAN VNI 102
+    pe1.run("ip link add name br102 type bridge stp_state 0")
+    pe1.run("ip addr add 10.10.2.1/24 dev br102")
+    pe1.run("ip link set dev br102 up")
+    pe1.run(
+        "ip link add vxlan102 type vxlan id 102 dstport 4789 local 10.10.10.11 nolearning"
+    )
+    pe1.run("ip link set dev vxlan102 master br102")
+    pe1.run("ip link set dev vxlan102 type bridge_slave neigh_suppress on learning off")
+    pe1.run("ip link set up dev vxlan102")
+    pe1.run("ip link set dev PE1-eth2 master br102")
+    pe1.run("ip link set dev PE1-eth2 type bridge_slave neigh_suppress on learning off")
+
+    pe2.run("ip link add name br102 type bridge stp_state 0")
+    pe2.run("ip addr add 10.10.2.3/24 dev br102")
+    pe2.run("ip link set dev br102 up")
+    pe2.run(
+        "ip link add vxlan102 type vxlan id 102 dstport 4789 local 10.30.30.31 nolearning"
+    )
+    pe2.run("ip link set dev vxlan102 master br102 addrgenmode none")
+    pe2.run("ip link set dev vxlan102 type bridge_slave neigh_suppress on learning off")
+    pe2.run("ip link set up dev vxlan102")
+    pe2.run("ip link set dev PE2-eth2 master br102")
+    pe2.run("ip link set dev PE2-eth2 type bridge_slave neigh_suppress on learning off")
 
     router_list = tgen.routers()
 
