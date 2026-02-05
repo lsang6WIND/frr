@@ -295,7 +295,7 @@ kmpw_add(struct zapi_pw *zpw)
 	debug_zebra_out("pseudowire %s nexthop %s (add)", zpw->ifname,
 			log_addr(zpw->af, (union g_addr *)&zpw->nexthop));
 
-	return zebra_send_pw(ldp_zclient, ZEBRA_PW_ADD, zpw) == ZCLIENT_SEND_FAILURE;
+	return zebra_send_pw(ldp_zclient, ZEBRA_L2VPN_SVC_ADD, zpw) == ZCLIENT_SEND_FAILURE;
 }
 
 int
@@ -304,7 +304,7 @@ kmpw_del(struct zapi_pw *zpw)
 	debug_zebra_out("pseudowire %s nexthop %s (del)", zpw->ifname,
 			log_addr(zpw->af, (union g_addr *)&zpw->nexthop));
 
-	return zebra_send_pw(ldp_zclient, ZEBRA_PW_DELETE, zpw) == ZCLIENT_SEND_FAILURE;
+	return zebra_send_pw(ldp_zclient, ZEBRA_L2VPN_SVC_DELETE, zpw) == ZCLIENT_SEND_FAILURE;
 }
 
 int
@@ -314,7 +314,7 @@ kmpw_set(struct zapi_pw *zpw)
 			log_addr(zpw->af, (union g_addr *)&zpw->nexthop), zpw->local_label,
 			zpw->remote_label);
 
-	return zebra_send_pw(ldp_zclient, ZEBRA_PW_SET, zpw) == ZCLIENT_SEND_FAILURE;
+	return zebra_send_pw(ldp_zclient, ZEBRA_L2VPN_SVC_SET, zpw) == ZCLIENT_SEND_FAILURE;
 }
 
 int
@@ -323,7 +323,7 @@ kmpw_unset(struct zapi_pw *zpw)
 	debug_zebra_out("pseudowire %s nexthop %s (unset)", zpw->ifname,
 			log_addr(zpw->af, (union g_addr *)&zpw->nexthop));
 
-	return zebra_send_pw(ldp_zclient, ZEBRA_PW_UNSET, zpw) == ZCLIENT_SEND_FAILURE;
+	return zebra_send_pw(ldp_zclient, ZEBRA_L2VPN_SVC_UNSET, zpw) == ZCLIENT_SEND_FAILURE;
 }
 
 void
@@ -674,7 +674,7 @@ static zclient_handler *const ldp_handlers[] = {
 	[ZEBRA_INTERFACE_ADDRESS_DELETE] = ldp_interface_address_delete,
 	[ZEBRA_REDISTRIBUTE_ROUTE_ADD] = ldp_zebra_read_route,
 	[ZEBRA_REDISTRIBUTE_ROUTE_DEL] = ldp_zebra_read_route,
-	[ZEBRA_PW_STATUS_UPDATE] = ldp_zebra_read_pw_status_update,
+	[ZEBRA_L2VPN_SVC_STATUS_UPDATE] = ldp_zebra_read_pw_status_update,
 	[ZEBRA_OPAQUE_MESSAGE] = ldp_zebra_opaque_msg_handler,
 };
 
