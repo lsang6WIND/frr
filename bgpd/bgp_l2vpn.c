@@ -5,7 +5,7 @@
  * This file is part of FRRouting
  */
 #include "lib/zebra.h"
-#include "lib/l2vpn.h"
+#include "lib/l2vpn_svc.h"
 
 #include "bgpd/bgp_l2vpn.h"
 

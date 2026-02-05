@@ -11,7 +11,7 @@
 #include "lib/command.h"
 #include "lib/northbound_cli.h"
 
-#include "lib/l2vpn.h"
+#include "lib/l2vpn_svc.h"
 
 #include "lib/l2vpn_cli_clippy.c"
 

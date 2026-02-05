@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * LDP L2VPNnorthbound CLI implementation.
+ * L2VPN Services (VPLS, VPWS) implementation.
  *
  * Copyright (C) 2019 Network Device Education Foundation, Inc. ("NetDEF")
  *                    Rafael Zalamena
+ * Copyright 2026 6WIND S.A.
  */
 
 #include <zebra.h>
@@ -12,7 +13,7 @@
 #include "lib/command.h"
 #include "lib/northbound_cli.h"
 
-#include "lib/l2vpn.h"
+#include "lib/l2vpn_svc.h"
 
 struct l2vpn_lib_register l2vpn_lib_master = { NULL, NULL, NULL, NULL };
 struct l2vpn_head l2vpn_tree_config;
