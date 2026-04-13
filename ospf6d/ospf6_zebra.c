@@ -401,6 +401,10 @@ static void ospf6_zebra_route_update(int type, struct ospf6_route *request,
 	int ret = 0;
 	struct prefix *dest;
 
+	/* Do not install connected routes. */
+	if (type == ADD && request->connected)
+		return;
+
 	if (IS_OSPF6_DEBUG_ZEBRA(SEND))
 		zlog_debug("Zebra Send %s route: %pFX",
 			   (type == REM ? "remove" : "add"), &request->prefix);
@@ -431,6 +435,9 @@ static void ospf6_zebra_route_update(int type, struct ospf6_route *request,
 				"  Best-path removal resulted Secondary addition");
 		type = ADD;
 		request = request->next;
+		/* Do not install if the promoted secondary is also connected. */
+		if (request->connected)
+			return;
 	}
 
 	/* Only the best path will be sent to zebra. */
@@ -530,6 +537,27 @@ void ospf6_zebra_route_update_remove(struct ospf6_route *request,
 	}
 
 	ospf6_zebra_route_update(REM, request, ospf6);
+}
+
+void ospf6_zebra_route_delete_prefix(struct ospf6_route *route, struct ospf6 *ospf6)
+{
+	struct zapi_route api;
+	int ret;
+
+	if (IS_OSPF6_DEBUG_ZEBRA(SEND))
+		zlog_debug("Send delete for route: %pFX a connected in Zebra now wins",
+			   &route->prefix);
+
+	zapi_route_init(&api);
+	api.vrf_id = ospf6->vrf_id;
+	api.type = ZEBRA_ROUTE_OSPF6;
+	api.safi = SAFI_UNICAST;
+	api.prefix = route->prefix;
+	ret = zclient_route_send(ZEBRA_ROUTE_DELETE, ospf6_zclient, &api);
+
+	if (ret == ZCLIENT_SEND_FAILURE)
+		flog_err(EC_LIB_ZAPI_SOCKET, "zclient_route_send() failed for prefix: %pFX",
+			 &route->prefix);
 }
 
 void ospf6_zebra_add_discard(struct ospf6_route *request, struct ospf6 *ospf6)

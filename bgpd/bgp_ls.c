@@ -480,6 +480,14 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 
 	dest = bgp_afi_node_get(bgp->rib[AFI_BGP_LS][SAFI_BGP_LS], AFI_BGP_LS, SAFI_BGP_LS, &p,
 				NULL);
+
+	/*
+	 * Unintern any existing NLRI reference before installing the new one
+	 * to avoid leaking the previous interned pointer.
+	 */
+	if (dest->ls_nlri)
+		bgp_ls_nlri_unintern(&dest->ls_nlri);
+
 	dest->ls_nlri = ls_nlri;
 
 	/* Make default attribute. */
@@ -530,7 +538,7 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 	/* Process change */
 	bgp_process(bgp, dest, new, AFI_BGP_LS, SAFI_BGP_LS);
 
-	/* route_node_get unlock */
+	/* Unlock node from bgp_afi_node_get */
 	bgp_dest_unlock_node(dest);
 
 	/* Unintern original */
@@ -589,8 +597,13 @@ int bgp_ls_withdraw(struct bgp *bgp, struct bgp_ls_nlri *nlri)
 	p.prefixlen = 32;
 	p.u.val32[0] = ls_nlri->id;
 
-	dest = bgp_afi_node_get(bgp->rib[AFI_BGP_LS][SAFI_BGP_LS], AFI_BGP_LS, SAFI_BGP_LS, &p,
-				NULL);
+	dest = bgp_node_lookup(bgp->rib[AFI_BGP_LS][SAFI_BGP_LS], &p);
+	if (!dest) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("%s: No RIB entry found for NLRI type=%u", __func__,
+				   nlri->nlri_type);
+		return 0;
+	}
 
 	/* Find path from local peer */
 	for (bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi = bpi->next)
@@ -614,7 +627,7 @@ int bgp_ls_withdraw(struct bgp *bgp, struct bgp_ls_nlri *nlri)
 			zlog_debug("%s: No path found for NLRI type=%u", __func__, nlri->nlri_type);
 	}
 
-	/* Unlock node from bgp_afi_node_get */
+	/* Unlock node from bgp_node_lookup */
 	bgp_dest_unlock_node(dest);
 
 	return 0;
@@ -640,28 +653,36 @@ int bgp_ls_withdraw(struct bgp *bgp, struct bgp_ls_nlri *nlri)
 int bgp_nlri_parse_ls(struct peer *peer, struct attr *attr, struct bgp_nlri *packet)
 {
 	struct stream *s;
-	struct bgp_ls_nlri nlri;
+	struct bgp_ls_nlri *nlri;
 	struct prefix p;
 	struct bgp_ls_nlri *ls_entry;
 	struct bgp_dest *dest;
 	int ret = BGP_NLRI_PARSE_OK;
+
+	if (!peer || !peer->bgp || !peer->bgp->ls_info || !packet)
+		return BGP_NLRI_PARSE_ERROR;
 
 	s = stream_new(packet->length);
 	stream_put(s, packet->nlri, packet->length);
 	stream_set_getp(s, 0);
 
 	while (STREAM_READABLE(s) > 0) {
-		memset(&nlri, 0, sizeof(nlri));
-		ret = bgp_ls_decode_nlri(s, &nlri);
+		nlri = bgp_ls_nlri_alloc();
+		if (!nlri) {
+			ret = BGP_NLRI_PARSE_ERROR;
+			goto done;
+		}
 
+		ret = bgp_ls_decode_nlri(s, nlri);
 		if (ret < 0) {
+			bgp_ls_nlri_free(nlri);
 			flog_warn(EC_BGP_LS_PACKET, "%s [Error] Failed to decode BGP-LS NLRI",
 				  peer->host);
 			ret = BGP_NLRI_PARSE_ERROR;
 			goto done;
 		}
 
-		ls_entry = bgp_ls_nlri_get(&peer->bgp->ls_info->nlri_hash, peer->bgp, &nlri);
+		ls_entry = bgp_ls_nlri_get(&peer->bgp->ls_info->nlri_hash, peer->bgp, nlri);
 
 		memset(&p, 0, sizeof(p));
 		p.family = AF_UNSPEC;
@@ -683,7 +704,9 @@ int bgp_nlri_parse_ls(struct peer *peer, struct attr *attr, struct bgp_nlri *pac
 
 		if (BGP_DEBUG(linkstate, LINKSTATE))
 			zlog_debug("%s processed BGP-LS %s NLRI type=%u", peer->host,
-				   attr ? "UPDATE" : "WITHDRAW", nlri.nlri_type);
+				   attr ? "UPDATE" : "WITHDRAW", nlri->nlri_type);
+
+		bgp_ls_nlri_free(nlri);
 	}
 
 done:
@@ -704,6 +727,9 @@ done:
  */
 bool bgp_ls_register(struct bgp *bgp)
 {
+	if (!bgp->ls_info)
+		return false;
+
 	/* Already registered */
 	if (bgp_ls_is_registered(bgp))
 		return true;
@@ -712,6 +738,11 @@ bool bgp_ls_register(struct bgp *bgp)
 		zlog_err("BGP-LS: Failed to register with Link State database");
 		return false;
 	}
+
+	if (ls_request_sync(bgp_zclient) == -1)
+		zlog_warn("BGP-LS: Failed to request initial Link State database sync");
+	else
+		zlog_info("BGP-LS: Requested initial Link State database sync");
 
 	bgp->ls_info->registered_ls_db = true;
 
@@ -727,16 +758,32 @@ bool bgp_ls_register(struct bgp *bgp)
  */
 bool bgp_ls_unregister(struct bgp *bgp)
 {
+	if (!bgp->ls_info)
+		return false;
+
 	/* Not registered */
 	if (!bgp_ls_is_registered(bgp))
 		return true;
+
+	/*
+	 * Clear the local registration flag *before* the zebra call.
+	 *
+	 * If ls_unregister() fails, BGP has lost sync with zebra.  Leaving
+	 * registered_ls_db set to true in that case would make
+	 * bgp_ls_is_registered() report "still registered", preventing any
+	 * subsequent bgp_ls_register() call from attempting re-registration
+	 * and leaving BGP permanently unable to receive link-state updates.
+	 *
+	 * By clearing the flag eagerly, bgp_ls_register() will see
+	 * registered_ls_db=false and attempt re-registration, giving the
+	 * system a chance to recover.
+	 */
+	bgp->ls_info->registered_ls_db = false;
 
 	if (ls_unregister(bgp_zclient, false) != 0) {
 		zlog_err("BGP-LS: Failed to unregister from Link State database");
 		return false;
 	}
-
-	bgp->ls_info->registered_ls_db = false;
 
 	zlog_info("BGP-LS: Unregistered from Link State database for BGP instance %s",
 		  bgp->name_pretty);
@@ -791,6 +838,9 @@ void bgp_ls_cleanup(struct bgp *bgp)
 	struct bgp_ls_attr *ls_attr;
 
 	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT)
+		return;
+
+	if (!bgp->ls_info)
 		return;
 
 	bgp_ls_unregister(bgp);

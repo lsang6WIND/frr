@@ -44,7 +44,7 @@ extern int bgp_ls_populate_link_attr(struct ls_attributes *ls_attr, struct bgp_l
  * @param attr BGP-LS prefix attribute structure to populate
  * @return 0 on success, -1 on error
  */
-extern int bgp_ls_populate_prefix_attr(struct ls_prefix *ls_prefix, struct bgp_ls_attr **attr);
+extern int bgp_ls_populate_prefix_attr(struct ls_prefix *ls_prefix, struct bgp_ls_attr *attr);
 
 /*
  * ===========================================================================
@@ -207,5 +207,16 @@ extern int bgp_ls_process_linkstate_message(struct stream *s, uint8_t msg_type);
  * @return 0 on success, -1 on error
  */
 extern int bgp_ls_process_message(struct bgp *bgp, struct ls_message *msg);
+
+/*
+ * Withdraw all locally originated BGP-LS routes and reset the TED.
+ *
+ * Called when the last BGP-LS peer is deactivated. Withdraws every node,
+ * link, and prefix NLRI that was originated from the TED, then discards
+ * the stale TED.
+ *
+ * @param bgp - BGP instance
+ */
+extern void bgp_ls_withdraw_ted(struct bgp *bgp);
 
 #endif /* _FRR_BGP_LS_TED_H */

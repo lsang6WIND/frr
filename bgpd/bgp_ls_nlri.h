@@ -251,6 +251,9 @@ enum bgp_ls_attr_tlv {
 #define BGP_LS_MAX_SRLG	      64 /* Maximum SRLGs per link */
 #define BGP_LS_MAX_UNRESV_BW  8	 /* 8 priority classes */
 #define BGP_LS_MAX_ROUTE_TAGS 16 /* Maximum route tags */
+#define BGP_LS_MAX_EXT_ADMIN_GROUPS 256 /* Maximum number of admin groups in Extended Admin Group TLV */
+#define BGP_LS_MAX_NODE_NAME_LEN 255	/* Maximum node name length */
+#define BGP_LS_MAX_LINK_NAME_LEN 255	/* Maximum link name length */
 
 /*
  * Bit positions for attribute presence bitmasks
@@ -318,6 +321,13 @@ enum bgp_ls_attr_tlv {
 #define BGP_LS_PREFIX_FLAG_NODE	      0x08 /* Node Prefix Attached Flag */
 
 /*
+ * IGP Prefix SID Flags (TLV 1158)
+ * RFC 9085 Section 2.3.1
+ */
+#define BGP_LS_PREFIX_SID_FLAG_VALUE 0x08 /* Same for IS-IS, OSPFv2, OSPFv3 */
+#define BGP_LS_PREFIX_SID_FLAG_LOCAL 0x04 /* Same for IS-IS, OSPFv2, OSPFv3 */
+
+/*
  * ===========================================================================
  * Descriptor Structures (RFC 9552 Section 5.2)
  * ===========================================================================
@@ -335,8 +345,8 @@ struct bgp_ls_node_descriptor {
 	as_t asn;		   /* Autonomous System Number */
 	uint32_t bgp_ls_id;	   /* BGP-LS Identifier (deprecated) */
 	uint32_t ospf_area_id;	   /* OSPF Area ID */
-	uint8_t igp_router_id_len; /* Length of IGP Router ID (4 or 8 bytes) */
-	uint8_t igp_router_id[8];  /* IGP Router ID (ISIS or OSPF) */
+	uint8_t igp_router_id_len; /* Length of IGP Router ID (4-16 bytes) */
+	uint8_t igp_router_id[BGP_LS_IGP_ROUTER_ID_MAX_SIZE]; /* IGP Router ID (ISIS, OSPF, Direct, or Static configuration) */
 };
 
 /*
@@ -548,7 +558,7 @@ struct bgp_ls_attr {
 	uint32_t igp_metric;
 
 	/* Shared Risk Link Group (TLV 1096) */
-	uint8_t srlg_count;
+	uint16_t srlg_count;
 	uint32_t *srlg_values;
 
 	/* Link Name (TLV 1098) */
@@ -583,7 +593,7 @@ struct bgp_ls_attr {
 	uint8_t igp_flags;
 
 	/* Route Tags (TLV 1153) */
-	uint8_t route_tag_count;
+	uint16_t route_tag_count;
 	uint32_t *route_tags;
 
 	/* Extended Tags (TLV 1154) */
@@ -596,6 +606,13 @@ struct bgp_ls_attr {
 	/* OSPF Forwarding Address (TLV 1156) */
 	struct in_addr ospf_fwd_addr;	/* IPv4 */
 	struct in6_addr ospf_fwd_addr6; /* IPv6 */
+
+	/* Prefix-SID (TLV 1158) */
+	struct prefix_sid {
+		uint8_t sid_flag; /* Segment Routing Flags */
+		uint8_t algo;	  /* Algorithm for Segment Routing */
+		uint32_t sid;	  /* Segment Routing ID */
+	} prefix_sid;
 
 	/* Opaque Node Attribute (TLV 1025/1097/1157) */
 	uint16_t opaque_len;
@@ -734,6 +751,13 @@ extern int bgp_ls_encode_nlri(struct stream *s, const struct bgp_ls_nlri *nlri);
 extern int bgp_ls_encode_attr(struct stream *s, const struct bgp_ls_attr *attr);
 
 /*
+ * Get Prefix-SID attribute SID length by flags
+ *
+ * @return 3 or 4 in normal case, -1 in error case
+ */
+extern int bgp_ls_attr_prefix_sid_len(uint8_t flags);
+
+/*
  * ===========================================================================
  * NLRI Decoding Functions
  * ===========================================================================
@@ -775,6 +799,17 @@ extern int bgp_ls_decode_nlri(struct stream *s, struct bgp_ls_nlri *nlri);
  * @return 0 on success, -1 on error
  */
 extern int bgp_ls_parse_attr(struct stream *s, uint16_t total_length, struct bgp_ls_attr *attr);
+
+/*
+ * Convert BGP-LS Attributes to JSON object
+ *
+ * @param ls_attr Pointer to BGP-LS attribute structure to convert
+ *
+ * Used for "show bgp" commands to display link-state topology information in json
+ *
+ * @return json object
+ */
+extern struct json_object *bgp_ls_attr_to_json(struct bgp_ls_attr *ls_attr);
 
 /*
  * Display BGP-LS Attributes to VTY output

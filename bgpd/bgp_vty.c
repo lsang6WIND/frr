@@ -137,6 +137,10 @@ FRR_CFG_DEFAULT_BOOL(BGP_COMPARE_AIGP,
 	{ .val_bool = false },
 );
 
+FRR_CFG_DEFAULT_BOOL(BGP_IPV6_NEXTHOP_PREFER_GLOBAL,
+	{ .val_bool = false },
+);
+
 DEFINE_HOOK(bgp_inst_config_write,
 		(struct bgp *bgp, struct vty *vty),
 		(bgp, vty));
@@ -740,6 +744,50 @@ int bgp_get_vty(struct bgp **bgp, as_t *as, const char *name,
 }
 
 /*
+ * Check if the given AFI/SAFI combination supports nexthop prefer-global.
+ * Currently limited to IPv6 UNICAST, MULTICAST, and LABELED_UNICAST.
+ */
+static inline bool bgp_nexthop_prefer_global_supported(afi_t afi, safi_t safi)
+{
+	return (afi == AFI_IP6 && BGP_IPV6_SAFI_SUPPORTS_NEXTHOP_PREFER_GLOBAL(safi));
+}
+
+/*
+ * Initialize nexthop prefer-global setting for all applicable IPv6 SAFIs.
+ * This applies to UNICAST, MULTICAST, and LABELED_UNICAST only.
+ */
+void bgp_init_ipv6_nexthop_prefer_global(struct bgp *bgp)
+{
+	safi_t safi;
+
+	if (!DFLT_BGP_IPV6_NEXTHOP_PREFER_GLOBAL)
+		return;
+
+	for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
+		if (BGP_IPV6_SAFI_SUPPORTS_NEXTHOP_PREFER_GLOBAL(safi))
+			bgp->nexthop_prefer_global[AFI_IP6][safi] = true;
+	}
+}
+
+/*
+ * Write nexthop prefer-global configuration for the given AFI/SAFI.
+ * Only writes non-default values to minimize configuration output.
+ */
+static void bgp_config_write_ipv6_nexthop_prefer_global(struct vty *vty, struct bgp *bgp,
+							afi_t afi, safi_t safi)
+{
+	/* Only applicable to specific IPv6 SAFIs */
+	if (!bgp_nexthop_prefer_global_supported(afi, safi))
+		return;
+
+	/* Only write if different from default */
+	if (bgp->nexthop_prefer_global[afi][safi] != SAVE_BGP_IPV6_NEXTHOP_PREFER_GLOBAL) {
+		vty_out(vty, "  %snexthop prefer-global\n",
+			bgp->nexthop_prefer_global[afi][safi] ? "" : "no ");
+	}
+}
+
+/*
  * bgp_vty_find_and_parse_afi_safi_bgp
  *
  * For a given 'show ...' command, correctly parse the afi/safi/bgp out from it
@@ -1047,12 +1095,6 @@ int bgp_vty_return(struct vty *vty, enum bgp_create_error_code ret)
 		break;
 	case BGP_ERR_GR_OPERATION_FAILED:
 		str = "The Graceful Restart Operation failed due to an err.";
-		break;
-	case BGP_ERR_PEER_GROUP_MEMBER:
-		str = "Peer-group member cannot override remote-as of peer-group.";
-		break;
-	case BGP_ERR_PEER_GROUP_PEER_TYPE_DIFFERENT:
-		str = "Peer-group members must be all internal or all external.";
 		break;
 	case BGP_ERR_DYNAMIC_NEIGHBORS_RANGE_NOT_FOUND:
 		str = "Range specified cannot be deleted because it is not part of current config.";
@@ -2805,6 +2847,34 @@ static void bgp_config_write_maxpaths(struct vty *vty, struct bgp *bgp,
 			vty_out(vty, " equal-cluster-length");
 		vty_out(vty, "\n");
 	}
+}
+
+/*
+ * nexthop prefer-global configuration command handler.
+ * Enables or disables preferring global IPv6 addresses over link-local
+ * addresses when both are available as nexthops.
+ */
+DEFPY (bgp_af_nexthop_prefer_global,
+       bgp_af_nexthop_prefer_global_cmd,
+       "[no] nexthop prefer-global",
+       NO_STR
+       "Nexthop\n"
+       "Prefer global over link-local if both exist\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	afi_t afi = bgp_node_afi(vty);
+	safi_t safi = bgp_node_safi(vty);
+	bool enable = !no;
+
+	if (!bgp || !bgp_nexthop_prefer_global_supported(afi, safi))
+		return CMD_WARNING_CONFIG_FAILED;
+
+	if (bgp->nexthop_prefer_global[afi][safi] != enable) {
+		bgp->nexthop_prefer_global[afi][safi] = enable;
+		bgp_clear_soft_in(bgp, afi, safi);
+	}
+
+	return CMD_SUCCESS;
 }
 
 /* BGP timers.  */
@@ -10114,7 +10184,7 @@ DEFPY(neighbor_encap_srv6,
 
 DEFPY(sid_export,
       sid_export_cmd,
-      "[no] sid export <(1-1048575)$sid_idx|auto$sid_auto|explicit$sid_explicit X:X::X:X$sid_value> [route-map RMAP$rmap_str]",
+      "[no] sid export <(1-1048575)$sid_idx|auto$sid_auto|explicit$sid_explicit X:X::X:X$sid_value> [behavior dt46$behavior_dt46] [route-map RMAP$rmap_str]",
       NO_STR
       "Sid value for VRF\n"
       "Encapsulation SRv6 over default vrf\n"
@@ -10122,6 +10192,8 @@ DEFPY(sid_export,
       "Automatically assign a label\n"
       "Explicitly assign a sid value\n"
       "Sid value\n"
+      "Specify SRv6 SID behavior\n"
+      "Allocate a DT46 SID\n"
       "Specify route-map name\n"
       "Name of route-map\n")
 {
@@ -10157,9 +10229,9 @@ DEFPY(sid_export,
 			return CMD_SUCCESS;
 
 		if (bgp->srv6_unicast[afi].rmap_name) {
-			XFREE(MTYPE_ROUTE_MAP_NAME, bgp->srv6_unicast[afi].rmap_name);
 			route_map_counter_decrement(
 				route_map_lookup_by_name(bgp->srv6_unicast[afi].rmap_name));
+			XFREE(MTYPE_ROUTE_MAP_NAME, bgp->srv6_unicast[afi].rmap_name);
 			bgp->srv6_unicast[afi].rmap_name = NULL;
 		}
 		if (bgp->srv6_unicast[afi].sid_explicit) {
@@ -10170,6 +10242,7 @@ DEFPY(sid_export,
 		UNSET_FLAG(bgp->af_flags[afi][safi], BGP_CONFIG_SRV6_UNICAST_SID_AUTO);
 
 		bgp_srv6_unicast_sid_withdraw(bgp, afi);
+		UNSET_FLAG(bgp->srv6_unicast[afi].flags, SRV6_POLICY_FLAG_BEHAVIOR_DT46);
 
 		return CMD_SUCCESS;
 	}
@@ -10178,10 +10251,27 @@ DEFPY(sid_export,
 	if ((sid_auto && CHECK_FLAG(bgp->af_flags[afi][safi], BGP_CONFIG_SRV6_UNICAST_SID_AUTO)) ||
 	    (sid_idx != 0 && bgp->srv6_unicast[afi].sid_index != 0) ||
 	    (sid_explicit && bgp->srv6_unicast[afi].sid_explicit)) {
+		if (!!behavior_dt46 !=
+		    !!CHECK_FLAG(bgp->srv6_unicast[afi].flags, SRV6_POLICY_FLAG_BEHAVIOR_DT46)) {
+			vty_out(vty,
+				"%% SID export is already configured. Unconfigure it first to reconfigure with a different behavior.\n");
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+
 		/* no rmap change */
 		if (!rmap_str || (bgp->srv6_unicast[afi].rmap_name &&
 				  !strcmp(rmap_str, bgp->srv6_unicast[afi].rmap_name)))
 			return CMD_SUCCESS;
+
+		if (bgp->srv6_unicast[afi].rmap_name) {
+			route_map_counter_decrement(
+				route_map_lookup_by_name(bgp->srv6_unicast[afi].rmap_name));
+			XFREE(MTYPE_ROUTE_MAP_NAME, bgp->srv6_unicast[afi].rmap_name);
+		}
+
+		bgp->srv6_unicast[afi].rmap_name = XSTRDUP(MTYPE_ROUTE_MAP_NAME, rmap_str);
+		route_map_counter_increment(
+			route_map_lookup_by_name(bgp->srv6_unicast[afi].rmap_name));
 
 		/* apply route-map change */
 		bgp_srv6_unicast_announce(bgp, afi);
@@ -10207,6 +10297,40 @@ DEFPY(sid_export,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
+	if (behavior_dt46) {
+		afi_t other_afi = (afi == AFI_IP) ? AFI_IP6 : AFI_IP;
+
+		if (is_srv6_unicast_dt46_enabled(bgp, other_afi)) {
+			bool other_auto = CHECK_FLAG(bgp->af_flags[other_afi][safi],
+						     BGP_CONFIG_SRV6_UNICAST_SID_AUTO);
+			uint32_t other_index = bgp->srv6_unicast[other_afi].sid_index;
+			bool other_explicit = !!bgp->srv6_unicast[other_afi].sid_explicit;
+
+			if (!!sid_auto != other_auto || (sid_idx != 0) != (other_index != 0) ||
+			    !!sid_explicit != other_explicit) {
+				vty_out(vty,
+					"%% DT46 sid export mode mismatch with %s unicast. Both address families must use the same mode (auto/index/explicit).\n",
+					afi2str(other_afi));
+				return CMD_WARNING_CONFIG_FAILED;
+			}
+
+			if (sid_idx != 0 && sid_idx != other_index) {
+				vty_out(vty,
+					"%% DT46 sid index mismatch with %s unicast (configured as %u). Both address families must use the same index.\n",
+					afi2str(other_afi), other_index);
+				return CMD_WARNING_CONFIG_FAILED;
+			}
+
+			if (sid_explicit && bgp->srv6_unicast[other_afi].sid_explicit &&
+			    !IPV6_ADDR_SAME(&sid_value, bgp->srv6_unicast[other_afi].sid_explicit)) {
+				vty_out(vty,
+					"%% DT46 explicit SID value mismatch with %s unicast. Both address families must use the same SID value.\n",
+					afi2str(other_afi));
+				return CMD_WARNING_CONFIG_FAILED;
+			}
+		}
+	}
+
 	if (rmap_str) {
 		bgp->srv6_unicast[afi].rmap_name = XSTRDUP(MTYPE_ROUTE_MAP_NAME, rmap_str);
 		route_map_counter_increment(
@@ -10222,6 +10346,11 @@ DEFPY(sid_export,
 		IPV6_ADDR_COPY(unicast_sid_explicit, &sid_value);
 		bgp->srv6_unicast[afi].sid_explicit = unicast_sid_explicit;
 	}
+
+	if (behavior_dt46)
+		SET_FLAG(bgp->srv6_unicast[afi].flags, SRV6_POLICY_FLAG_BEHAVIOR_DT46);
+	else
+		UNSET_FLAG(bgp->srv6_unicast[afi].flags, SRV6_POLICY_FLAG_BEHAVIOR_DT46);
 
 	/* request srv6 sid */
 	bgp_srv6_unicast_ensure_afi_sid(bgp, afi);
@@ -12400,6 +12529,10 @@ DEFPY(show_bgp_router,
 	if (uj) {
 		json_object_int_add(json, "bgpInputQueueLimit", bm->inq_limit);
 		json_object_int_add(json, "bgpOutputQueueLimit", bm->outq_limit);
+		json_object_int_add(json, "zebraAnnounceCount",
+				    zebra_announce_count(&bm->zebra_announce_head));
+		json_object_int_add(json, "zebraAnnounceEarlyCount",
+				    zebra_announce_count(&bm->zebra_announce_early_head));
 		json_object_int_add(json, "bgpUpdateDelayTime", bm->v_update_delay);
 		json_object_int_add(json, "bgpEstablishWaitTime", bm->v_establish_wait);
 		json_object_int_add(json, "bgpRmapDelayTimer", bm->rmap_update_timer);
@@ -12409,6 +12542,10 @@ DEFPY(show_bgp_router,
 	} else {
 		vty_out(vty, "BGP Input Queue Limit: %d\n", bm->inq_limit);
 		vty_out(vty, "BGP Output Queue Limit: %d\n", bm->outq_limit);
+		vty_out(vty, "Zebra announce queue (priority): %zu\n",
+			zebra_announce_count(&bm->zebra_announce_early_head));
+		vty_out(vty, "Zebra announce queue (normal): %zu\n",
+			zebra_announce_count(&bm->zebra_announce_head));
 
 		vty_out(vty, "BGP Global Update Delay Timers:\n");
 		vty_out(vty, "  Update Delay Time: %ds\n", bm->v_update_delay);
@@ -15536,7 +15673,6 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 	if (show_brief) {
 		if (use_json) {
 			time_t uptime;
-			struct tm tm;
 
 			if (p->hostname)
 				json_object_string_add(json_neigh, "hostname", p->hostname);
@@ -15554,10 +15690,9 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 
 			uptime = monotime(NULL);
 			uptime -= p->resettime;
-			gmtime_r(&uptime, &tm);
+
 			json_object_int_add(json_neigh, "lastResetTimerMsecs",
-					    (tm.tm_sec * 1000) + (tm.tm_min * 60000) +
-						    (tm.tm_hour * 3600000));
+					    (int64_t)uptime * 1000);
 			json_stat = json_object_new_object();
 			json_object_int_add(json_stat, "totalSent", PEER_TOTAL_TX(p));
 			json_object_int_add(json_stat, "totalRecv", PEER_TOTAL_RX(p));
@@ -17091,16 +17226,12 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 	} else {
 		if (use_json) {
 			time_t uptime;
-			struct tm tm;
 
 			uptime = monotime(NULL);
 			uptime -= p->resettime;
-			gmtime_r(&uptime, &tm);
 
 			json_object_int_add(json_neigh, "lastResetTimerMsecs",
-					    (tm.tm_sec * 1000)
-						    + (tm.tm_min * 60000)
-						    + (tm.tm_hour * 3600000));
+					    (int64_t)uptime * 1000);
 			bgp_show_peer_reset(NULL, p, json_neigh, true);
 		} else {
 			vty_out(vty, "  Last reset %s, ",
@@ -19898,7 +20029,14 @@ static void bgp_config_write_peer_global(struct vty *vty, struct bgp *bgp,
 	if (peer_group_active(peer)) {
 		g_peer = peer->group->conf;
 
-		if (g_peer->as_type == AS_UNSPECIFIED && !if_ras_printed) {
+		/* For swpX peers we displayed the peer-group
+		 * via 'neighbor swpX interface peer-group PGNAME' */
+		if (!if_pg_printed)
+			vty_out(vty, " neighbor %s peer-group %s\n", addr, peer->group->name);
+
+		if ((g_peer->as_type != peer->as_type ||
+		     (peer->as_type == AS_SPECIFIED && g_peer->as != peer->as)) &&
+		    !if_ras_printed) {
 			if (peer->as_type == AS_SPECIFIED) {
 				vty_out(vty, " neighbor %s remote-as %s\n",
 					addr, peer->as_pretty);
@@ -19915,12 +20053,6 @@ static void bgp_config_write_peer_global(struct vty *vty, struct bgp *bgp,
 					addr);
 			}
 		}
-
-		/* For swpX peers we displayed the peer-group
-		 * via 'neighbor swpX interface peer-group PGNAME' */
-		if (!if_pg_printed)
-			vty_out(vty, " neighbor %s peer-group %s\n", addr,
-				peer->group->name);
 	}
 
 	/* peer is NOT a member of a peer-group */
@@ -20635,6 +20767,8 @@ static void bgp_config_write_family(struct vty *vty, struct bgp *bgp, afi_t afi,
 
 	bgp_config_write_redistribute(vty, bgp, afi, safi);
 
+	bgp_config_write_ipv6_nexthop_prefer_global(vty, bgp, afi, safi);
+
 	/* BGP flag dampening. */
 	if (CHECK_FLAG(bgp->af_flags[afi][safi], BGP_CONFIG_DAMPENING))
 		bgp_config_write_damp(vty, bgp, afi, safi);
@@ -20698,6 +20832,8 @@ static void bgp_config_write_family(struct vty *vty, struct bgp *bgp, afi_t afi,
 					bgp->srv6_unicast[afi].sid_explicit);
 			else if (bgp->srv6_unicast[afi].sid_index)
 				vty_out(vty, "  sid export %u", bgp->srv6_unicast[afi].sid_index);
+			if (is_srv6_unicast_dt46_enabled(bgp, afi))
+				vty_out(vty, " behavior dt46");
 			if (bgp->srv6_unicast[afi].rmap_name)
 				vty_out(vty, " route-map %s", bgp->srv6_unicast[afi].rmap_name);
 			vty_out(vty, "\n");
@@ -21890,6 +22026,11 @@ void bgp_vty_init(void)
 	install_element(BGP_NODE, &no_bgp_coalesce_time_cmd);
 
 	install_element(BGP_NODE, &bgp_use_underlying_nexthop_weight_cmd);
+
+	/* "nexthop prefer-global" commands */
+	install_element(BGP_IPV6_NODE, &bgp_af_nexthop_prefer_global_cmd);
+	install_element(BGP_IPV6M_NODE, &bgp_af_nexthop_prefer_global_cmd);
+	install_element(BGP_IPV6L_NODE, &bgp_af_nexthop_prefer_global_cmd);
 
 	/* "maximum-paths" commands. */
 	install_element(BGP_NODE, &bgp_maxpaths_hidden_cmd);

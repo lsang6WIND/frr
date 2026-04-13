@@ -1287,6 +1287,40 @@ IPv6 Support
    Using the ``bgp default ipv6-unicast`` configuration, IPv6 unicast
    address family is enabled by default for all new neighbors.
 
+.. clicmd:: nexthop prefer-global
+
+   This command is used within an IPv6 address family configuration (IPv6
+   unicast, IPv6 multicast, or IPv6 labeled-unicast) to control which nexthop
+   is installed to Zebra and the kernel routing table.
+
+   When a BGP UPDATE is received with both a global IPv6 address and a
+   link-local IPv6 address as nexthops, the BGP RIB stores both nexthops.
+   However, only one nexthop can be installed to Zebra for packet forwarding.
+   This command causes BGP to install the global IPv6 address to Zebra instead
+   of the link-local address. By default, FRR installs link-local addresses
+   when both are available.
+
+   **Important:** This command does not change the BGP RIB contents - the RIB
+   always contains both global and link-local nexthops when both are received.
+   It only affects which nexthop is selected for installation to Zebra and
+   subsequently to the kernel routing table.
+
+   This is similar to using ``set ipv6 next-hop prefer-global`` in a route-map,
+   but applies globally to all routes received for the configured address family,
+   rather than being applied on a per-route basis. When both configurations are
+   present, they work cooperatively (both set the same flag).
+
+   The ``no`` form of this command restores the default behavior of installing
+   link-local addresses to Zebra.
+
+   .. code-block:: frr
+
+      router bgp 65000
+       address-family ipv6 unicast
+        nexthop prefer-global
+       exit-address-family
+
+   Default: disabled (link-local addresses are installed to Zebra).
 
 .. clicmd:: bgp ipv6-auto-ra
 
@@ -1714,20 +1748,24 @@ Configuring Peers
 
    Set description of the peer.
 
-.. clicmd:: neighbor PEER interface [peer-group NAME]
+.. clicmd:: neighbor PEER interface [v6only] [peer-group NAME]
 
-   Configure an unnumbered BGP peer. ``PEER`` should be an interface name. The
-   session will be established via IPv6 link locals. To specify IPv4 session
-   addresses, see the ``neighbor PEER update-source`` command below.
+   Configure an interface-based (unnumbered) BGP peer; ``PEER`` is the interface
+   name. By default, *bgpd* tries to derive the neighbor IPv4 address from a /30
+   or /31 on the interface and establish the session over IPv4; if that is not
+   possible, it uses the peer's IPv6 link-local address. If ``v6only`` is
+   specified, *bgpd* skips trying IPv4 and establishes the session directly via
+   IPv6 link-local. For the local TCP source address, see
+   ``neighbor PEER update-source`` below.
 
-.. clicmd:: neighbor PEER interface remote-as <internal|external|auto|ASN>
+.. clicmd:: neighbor PEER interface [v6only] remote-as <internal|external|auto|ASN>
 
-   Configure an unnumbered BGP peer. ``PEER`` should be an interface name. The
-   session will be established via IPv6 link locals. Use ``internal`` for iBGP
-   and ``external`` for eBGP sessions, or specify an ASN if you wish.  Finally
-   this connection type is meant for point to point connections.  If you are
-   on an ethernet segment and attempt to use this with more than one bgp
-   neighbor, only one neighbor will come up, due to how this feature works.
+   Configure an interface-based BGP peer and set ``remote-as`` in one command.
+   Session address selection follows ``neighbor PEER interface`` above. Use
+   ``internal`` for iBGP and ``external`` for eBGP sessions, or specify an ASN
+   if you wish. This connection type is meant for point to point connections.
+   If you are on an ethernet segment and attempt to use this with more than one
+   bgp neighbor, only one neighbor will come up, due to how this feature works.
 
 .. clicmd:: neighbor PEER next-hop-self [force]
 
@@ -3566,7 +3604,7 @@ Configuration of the SRv6 SID used to advertise the Global IPv4/v6 Table is
 accomplished via the following command, which lives under ``address-family ipv4
 unicast``/``address-family ipv6 unicast`` only in the default VRF:
 
-.. clicmd:: sid export <(1..1048575)|auto|explicit X:X::X:X> [route-map RNAME]
+.. clicmd:: sid export <(1..1048575)|auto|explicit X:X::X:X> [behavior dt46] [route-map RNAME]
 
    Enables a SRv6 SID to be attached to routes in the current unicast
    address-family, received routes that already have a SID attached are ignored.
@@ -3577,8 +3615,35 @@ unicast``/``address-family ipv6 unicast`` only in the default VRF:
    configured or if SID allocation is failed, automatic or explicit SID
    assignment will not complete, which will block corresponding routes SID
    assignment.
+
    If the ``route-map RNAME`` is configured, routes are filtered according to
    its rules.
+
+   By default, the SID behavior is determined by the address-family:
+   **End.DT4** under ``address-family ipv4 unicast`` and **End.DT6** under
+   ``address-family ipv6 unicast``.  For uSID locators, ``uDT4`` and
+   ``uDT6`` are used respectively.
+
+   The optional ``behavior dt46`` keyword overrides this default and requests
+   an **End.DT46** SID (or ``uDT46`` for uSID locators).
+
+   Example — configure both the IPv4 and IPv6 address-families to use a
+   shared End.DT46 SID:
+
+   .. code-block:: frr
+
+      router bgp 65001
+       address-family ipv4 unicast
+        sid export auto behavior dt46
+       exit-address-family
+       address-family ipv6 unicast
+        sid export auto behavior dt46
+       exit-address-family
+      !
+
+   When both address-families specify ``behavior dt46``, the SID Manager
+   allocates a single SID that handles both IPv4 and IPv6 traffic.
+
 
 .. clicmd:: neighbor <X:X::X:X|WORD> <encapsulation-srv6|encapsulation-srv6-relax>
 
@@ -4675,11 +4740,11 @@ daemon project, while :clicmd:`show bgp` command is the new format. The choice
 has been done to keep old format with IPv4 routing table, while new format
 displays IPv6 routing table.
 
-.. clicmd:: show ip bgp [all] [wide|json [detail]]
+.. clicmd:: show ip bgp [all] [wide|json [detail|brief]]
 
 .. clicmd:: show ip bgp A.B.C.D [json]
 
-.. clicmd:: show bgp [all] [wide|json [detail]]
+.. clicmd:: show bgp [all] [wide|json [detail|brief]]
 
 .. clicmd:: show bgp X:X::X:X [json]
 
@@ -4710,6 +4775,13 @@ displays IPv6 routing table.
 
    If ``detail`` option is specified after ``json``, more verbose JSON output
    will be displayed.
+
+   If ``brief`` option is specified after ``json``, a brief JSON output is
+   displayed: only the loc-rib structure with prefix keys (no per-path
+   details). This is intended for large routing tables and automation. The
+   same ``json brief`` form applies to the VRF/address-family commands, e.g.
+   :clicmd:`show bgp vrf NAME ipv4 unicast json brief` and
+   :clicmd:`show bgp vrf NAME ipv6 unicast json brief`.
 
 .. clicmd:: show bgp router [json]
 
@@ -4795,9 +4867,12 @@ incoming/outgoing directions.
 
    EVPN prefixes can also be filtered by EVPN route type.
 
-.. clicmd:: show bgp l2vpn evpn route [detail] [type <ead|1|macip|2|multicast|3|es|4|prefix|5>] self-originate [json]
+.. clicmd:: show bgp l2vpn evpn route [detail] [type <ead|1|macip|2|multicast|3|es|4|prefix|5>] [self-originate] [brief] [json]
 
-   Display self-originated EVPN prefixes which can also be filtered by EVPN route type.
+   Display the global EVPN routing table. With ``detail``, show per-path
+   information. With ``brief`` and ``json``, output a minimal loc-rib in JSON
+   format (prefix keys per RD only, no paths or detail). Route type and
+   self-originate filters apply to both normal and brief output.
 
 .. clicmd:: show bgp vni <all|VNI> [vtep VTEP] [type <ead|1|macip|2|multicast|3>] [<detail|json>]
 

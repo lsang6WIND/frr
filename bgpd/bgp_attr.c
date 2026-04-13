@@ -143,13 +143,16 @@ static bool cluster_hash_cmp(const void *p1, const void *p2)
 	const struct cluster_list *cluster1 = p1;
 	const struct cluster_list *cluster2 = p2;
 
+	/* Check length first - must match for equality */
+	if (cluster1->length != cluster2->length)
+		return false;
+
+	/* If same pointer and same length, they're equal */
 	if (cluster1->list == cluster2->list)
 		return true;
 
+	/* Check for NULL pointers */
 	if (!cluster1->list || !cluster2->list)
-		return false;
-
-	if (cluster1->length != cluster2->length)
 		return false;
 
 	return (memcmp(cluster1->list, cluster2->list, cluster1->length) == 0);
@@ -1407,7 +1410,6 @@ struct attr *bgp_attr_default_set(struct attr *attr, struct bgp *bgp,
 	attr->tag = 0;
 	attr->label_index = BGP_INVALID_LABEL_INDEX;
 	attr->label = MPLS_INVALID_LABEL;
-	bgp_attr_set(attr, BGP_ATTR_NEXT_HOP);
 	attr->mp_nexthop_len = IPV6_MAX_BYTELEN;
 	attr->local_pref = bgp->default_local_pref;
 
@@ -2747,6 +2749,17 @@ int bgp_mp_reach_parse(struct bgp_attr_parser_args *args,
 		fallthrough;
 	case BGP_ATTR_NHLEN_IPV4:
 		stream_get(&attr->mp_nexthop_global_in, s, IPV4_MAX_BYTELEN);
+
+		/* We do already the same validation for NEXT_HOP attribute,
+		 * so let's do it here as well for consistency and to avoid potential
+		 * security issues with martian addresses in MP_REACH_NLRI.
+		 */
+		if (ipv4_martian(&attr->mp_nexthop_global_in) && !peer->bgp->allow_martian) {
+			zlog_warn("%s sent martian nexthop %pI4 in MP_REACH_NLRI", peer->host,
+				  &attr->mp_nexthop_global_in);
+			return BGP_ATTR_PARSE_WITHDRAW;
+		}
+
 		/* Probably needed for RFC 2283 */
 		if (attr->nexthop.s_addr == INADDR_ANY)
 			memcpy(&attr->nexthop.s_addr,
@@ -3003,6 +3016,7 @@ bgp_attr_ext_communities(struct bgp_attr_parser_args *args)
 	const bgp_size_t length = args->length;
 	bool proxy = false;
 	struct ecommunity *ecomm;
+	bgp_encap_types tun_type = BGP_ENCAP_TYPE_VXLAN;/*Default tunnel type*/
 
 	if (length == 0) {
 		bgp_attr_set_ecommunity(attr, NULL);
@@ -3056,8 +3070,8 @@ bgp_attr_ext_communities(struct bgp_attr_parser_args *args)
 	}
 
 	/* Get the tunnel type from encap extended community */
-	bgp_attr_extcom_tunnel_type(attr,
-		(bgp_encap_types *)&attr->encap_tunneltype);
+	bgp_attr_extcom_tunnel_type(attr, &tun_type);
+	attr->encap_tunneltype = tun_type;
 
 	/* Extract link bandwidth, if any. */
 	(void)ecommunity_linkbw_present(bgp_attr_get_ecommunity(attr),
@@ -3145,27 +3159,60 @@ static int bgp_attr_encap(struct bgp_attr_parser_args *args)
 		length -= 4;
 
 		if (tlv_length != length) {
-			zlog_info("%s: tlv_length(%d) != length(%d)",
-				  __func__, tlv_length, length);
+			flog_err(EC_BGP_ATTR_LEN,
+				 "Tunnel Encap attribute length %d does not match remaining attribute length %d",
+				 tlv_length, length);
+			return bgp_attr_malformed(args, BGP_NOTIFY_UPDATE_OPT_ATTR_ERR,
+						  args->total);
 		}
 	}
 
-	while (STREAM_READABLE(BGP_INPUT(connection)) >= 4) {
+	while (length > 0 && STREAM_READABLE(BGP_INPUT(connection)) >= 4) {
 		uint16_t subtype = 0;
 		uint16_t sublength = 0;
 		struct bgp_attr_encap_subtlv *tlv;
 
 		if (BGP_ATTR_ENCAP == type) {
+			if (length < 1) {
+				flog_err(EC_BGP_ATTR_LEN,
+					 "Tunnel Encap attribute length %d too short for sub-TLV",
+					 length);
+				return bgp_attr_malformed(args, BGP_NOTIFY_UPDATE_OPT_ATTR_ERR,
+							  args->total);
+			}
 			subtype = stream_getc(BGP_INPUT(connection));
 			if (subtype < 128) {
+				if (length < 2) {
+					flog_err(EC_BGP_ATTR_LEN,
+						 "Tunnel Encap attribute length %d too short for sub-TLV",
+						 length);
+					return bgp_attr_malformed(args,
+								  BGP_NOTIFY_UPDATE_OPT_ATTR_ERR,
+								  args->total);
+				}
 				sublength = stream_getc(BGP_INPUT(connection));
 				length -= 2;
 			} else {
+				if (length < 3) {
+					flog_err(EC_BGP_ATTR_LEN,
+						 "Tunnel Encap attribute length %d too short for sub-TLV",
+						 length);
+					return bgp_attr_malformed(args,
+								  BGP_NOTIFY_UPDATE_OPT_ATTR_ERR,
+								  args->total);
+				}
 				sublength = stream_getw(BGP_INPUT(connection));
 				length -= 3;
 			}
 #ifdef ENABLE_BGP_VNC
 		} else {
+			if (length < 4) {
+				flog_err(EC_BGP_ATTR_LEN,
+					 "Tunnel Encap attribute length %d too short for sub-TLV",
+					 length);
+				return bgp_attr_malformed(args, BGP_NOTIFY_UPDATE_OPT_ATTR_ERR,
+							  args->total);
+			}
 			subtype = stream_getw(BGP_INPUT(connection));
 			sublength = stream_getw(BGP_INPUT(connection));
 			length -= 4;
@@ -3380,15 +3427,12 @@ bgp_attr_srv6_service(struct bgp_attr_parser_args *args)
 	}
 
 	if (type == BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO) {
-		if (STREAM_READABLE(connection->curr) <
-		    BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH) {
+		if (length < BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH) {
 			flog_err(EC_BGP_ATTR_LEN,
-				 "Malformed SRv6 Service Sub-TLV attribute - insufficient data (need %d for attribute data, have %zu remaining in UPDATE)",
-				 BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH,
-				 STREAM_READABLE(connection->curr));
-			return bgp_attr_malformed(
-				args, BGP_NOTIFY_UPDATE_ATTR_LENG_ERR,
-				args->total);
+				 "Malformed SRv6 Service Sub-TLV attribute - declared length %u is less than minimum %d",
+				 length, BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH);
+			return bgp_attr_malformed(args, BGP_NOTIFY_UPDATE_ATTR_LENG_ERR,
+						  args->total);
 		}
 		stream_getc(connection->curr);
 		stream_get(&ipv6_sid, connection->curr, sizeof(ipv6_sid));
@@ -3873,13 +3917,6 @@ static int bgp_attr_nhc(struct bgp_attr_parser_args *args)
 	} else if (nh_length == BGP_ATTR_NHLEN_IPV6_GLOBAL) {
 		stream_get(&nhc->nh_ipv6, s, IPV6_MAX_BYTELEN);
 		length -= IPV6_MAX_BYTELEN;
-		if (IN6_IS_ADDR_LINKLOCAL(&nhc->nh_ipv6)) {
-			if (!peer->nexthop.ifp) {
-				zlog_warn("%pBP sent a v6 global attribute but address is a V6 LL and there's no peer interface information. Hence, withdrawing",
-					  peer);
-				return BGP_ATTR_PARSE_PROCEED;
-			}
-		}
 	} else {
 		zlog_err("%pBP sent wrong next-hop length, %d, in NHC", peer, attr->mp_nexthop_len);
 		bgp_nhc_free(nhc);
@@ -3900,7 +3937,7 @@ static int bgp_attr_nhc(struct bgp_attr_parser_args *args)
 		tlv_code = stream_getw(s);
 		tlv_length = stream_getw(s);
 
-		if (length < tlv_length) {
+		if (length < tlv_length + BGP_NHC_TLV_MIN_LEN) {
 			zlog_err("%pBP rcvd BGP NHC TLV length %d exceeds remaining length %d",
 				 peer, tlv_length, length);
 			bgp_nhc_free(nhc);
@@ -3943,6 +3980,18 @@ static int bgp_attr_nhc(struct bgp_attr_parser_args *args)
 			bgp_nhc_tlv_free(tlv);
 
 		length -= tlv_length + BGP_NHC_TLV_MIN_LEN;
+	}
+
+	/*
+	 * draft-ietf-idr-nhc: if the next hop has no global part (i.e. it
+	 * is a link-local address), the sender MUST include a BGPID TLV to
+	 * avoid a false-positive "semantic match".
+	 */
+	if (nhc->nh_length == BGP_ATTR_NHLEN_IPV6_GLOBAL && IN6_IS_ADDR_LINKLOCAL(&nhc->nh_ipv6) &&
+	    !bgp_nhc_tlv_find(nhc, BGP_ATTR_NHC_TLV_BGPID)) {
+		zlog_warn("%pBP sent link-local next-hop in NHC without required BGPID TLV", peer);
+		bgp_nhc_free(nhc);
+		return BGP_ATTR_PARSE_PROCEED;
 	}
 
 	bgp_attr_set_nhc(attr, bgp_nhc_intern(nhc));
@@ -4530,6 +4579,14 @@ enum bgp_attr_parse_ret bgp_attr_parse(struct peer *peer, struct attr *attr,
 
 	ret = BGP_ATTR_PARSE_PROCEED;
 done:
+	/* On WITHDRAW/WITHDRAW_IGNORE the parser stopped early without
+	 * consuming all attribute bytes.  RFC 7606 s.5.1 requires using
+	 * Total Attribute Length to locate the NLRI field, so reset the
+	 * stream to the known-good post-attribute position here rather
+	 * than relying on the caller to do it.
+	 */
+	if (ret == BGP_ATTR_PARSE_WITHDRAW || ret == BGP_ATTR_PARSE_WITHDRAW_IGNORE)
+		stream_forward_getp(BGP_INPUT(connection), endp - BGP_INPUT_PNT(connection));
 
 	/*
 	 * At this stage, we have done all fiddling with as4, and the
@@ -4876,10 +4933,10 @@ static void bgp_packet_ls_attribute(struct stream *s, struct bgp *bgp, struct at
 
 	/* Write BGP-LS attribute header (RFC 9552 Section 4) */
 	attr_start = stream_get_endp(s);
-	stream_putc(s, BGP_ATTR_FLAG_OPTIONAL);
+	stream_putc(s, BGP_ATTR_FLAG_OPTIONAL | BGP_ATTR_FLAG_EXTLEN);
 	stream_putc(s, BGP_ATTR_LINK_STATE);
 	len_pos = stream_get_endp(s);
-	stream_putc(s, 0); /* Placeholder for length */
+	stream_putw(s, 0); /* Placeholder for extended length */
 
 	ret = bgp_ls_encode_attr(s, ls_attr);
 
@@ -4890,9 +4947,13 @@ static void bgp_packet_ls_attribute(struct stream *s, struct bgp *bgp, struct at
 	}
 
 	/* Update the length field */
-	attr_len = stream_get_endp(s) - len_pos - 1;
+	attr_len = stream_get_endp(s) - len_pos - 2;
+	if (attr_len > UINT16_MAX) {
+		stream_set_endp(s, attr_start);
+		return;
+	}
 
-	stream_putc_at(s, len_pos, attr_len);
+	stream_putw_at(s, len_pos, attr_len);
 }
 
 void bgp_packet_mpattr_prefix(struct stream *s, afi_t afi, safi_t safi, const struct prefix *p,

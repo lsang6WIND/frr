@@ -1345,11 +1345,13 @@ static void zebra_if_addr_update_ctx(struct zebra_dplane_ctx *ctx,
 	}
 
 	/*
-	 * Linux kernel does not send route delete on interface down/addr del
+	 * Linux kernel does not send route delete on interface down/IPv4 last addr del
 	 * so we have to re-process routes it owns (i.e. kernel routes)
+	 * See rib_update_handle_kernel_route_down_possibility for more details
 	 */
-	if (op != DPLANE_OP_INTF_ADDR_ADD)
-		rib_update(RIB_UPDATE_KERNEL);
+	if (op != DPLANE_OP_INTF_ADDR_ADD && addr->family == AF_INET &&
+	    !if_has_connected_with_family(ifp, AF_INET))
+		rib_update(RIB_UPDATE_KERNEL_LAST_IPV4_ADDRESS_DELETED);
 }
 
 static void zebra_if_update_ctx(struct zebra_dplane_ctx *ctx,
@@ -1914,19 +1916,15 @@ static void interface_bridge_vlan_update(struct zebra_dplane_ctx *ctx,
 	uint16_t vid_range_start = 0;
 	int32_t i;
 
+	/* Could we have multiple bridge vlan infos? */
+	bvarray = dplane_ctx_get_ifp_bridge_vlan_info_array(ctx);
+	if (!bvarray)
+		return;
+
 	/* cache the old bitmap addrs */
 	old_vlan_bitmap = zif->vlan_bitmap;
 	/* create a new bitmap space for re-eval */
 	bf_init(zif->vlan_bitmap, IF_VLAN_BITMAP_MAX);
-
-	/* Could we have multiple bridge vlan infos? */
-	bvarray = dplane_ctx_get_ifp_bridge_vlan_info_array(ctx);
-	if (!bvarray) {
-		bf_free(zif->vlan_bitmap);
-		zif->vlan_bitmap = old_vlan_bitmap;
-
-		return;
-	}
 
 	for (i = 0; i < bvarray->count; i++) {
 		bvinfo = bvarray->array[i];

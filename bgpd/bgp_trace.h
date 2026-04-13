@@ -75,7 +75,7 @@ TRACEPOINT_EVENT(
 		ctf_integer(uint32_t, addpath_id, addpath_id)
 		ctf_integer(afi_t, afi, afi)
 		ctf_integer(safi_t, safi, safi)
-		ctf_integer_hex(intptr_t, attribute_ptr, attr)
+		ctf_integer_hex(intptr_t, attribute_ptr, (intptr_t)attr)
 	)
 )
 
@@ -329,7 +329,7 @@ TRACEPOINT_EVENT(
 	TP_FIELDS(
 		ctf_string(action, add ? "add" : "del")
 		ctf_integer(vni_t, vni, (vpn ? vpn->vni : 0))
-		ctf_integer(uint32_t, eth_tag, &pfx->prefix.macip_addr.eth_tag)
+		ctf_integer(uint32_t, eth_tag, pfx->prefix.macip_addr.eth_tag)
 		ctf_array(unsigned char, mac, &pfx->prefix.macip_addr.mac,
 			sizeof(struct ethaddr))
 		ctf_array(unsigned char, ip, &pfx->prefix.macip_addr.ip,

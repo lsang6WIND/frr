@@ -972,6 +972,18 @@ struct nbr_connected *nbr_connected_check(struct interface *ifp,
 	return NULL;
 }
 
+/* Return true if there is at least one connected address in the given family  */
+bool if_has_connected_with_family(struct interface *ifp, int family)
+{
+	struct connected *connected;
+
+	frr_each (if_connected, ifp->connected, connected)
+		if (connected->address->family == family)
+			return true;
+
+	return false;
+}
+
 /* count the number of connected addresses that are in the given family */
 unsigned int connected_count_by_family(struct interface *ifp, int family)
 {
@@ -1745,8 +1757,7 @@ static enum nb_error lib_interface_vrf_get(const struct nb_node *nb_node, const 
 	const struct lysc_node *snode = nb_node->snode;
 	const struct interface *ifp = list_entry;
 
-	if (lyd_new_term(parent, snode->module, snode->name, ifp->vrf->name, LYD_NEW_PATH_UPDATE,
-			 NULL))
+	if (lyd_new_term(parent, snode->module, snode->name, ifp->vrf->name, false, NULL))
 		return NB_ERR_RESOURCE;
 	return NB_OK;
 }

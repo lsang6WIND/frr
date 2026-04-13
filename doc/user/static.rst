@@ -14,8 +14,8 @@ Starting STATIC
 
 .. program:: staticd
 
-:abbr:`STATIC` supports all the common FRR daemon start options which are
-documented elsewhere.
+:abbr:`STATIC` supports all the common FRR daemon start options
+(:ref:`common-invocation-options`).
 
 .. include:: config-include.rst
 
@@ -192,11 +192,11 @@ multiple segments instructions.
 
 ::
 
-  router(config)# ipv6 route 2005::1/64 ens3 segments 2001:db8:aaaa::7/2002::4/2002::3/2002::2
+  router(config)# ipv6 route 2005::1/64 sr0 segments 2001:db8:aaaa::7/2002::4/2002::3/2002::2
 
   router# show ipv6 route
   [..]
-  S>* 2005::/64 [1/0] is directly connected, ens3, seg6 2001:db8:aaaa::7,2002::4,2002::3,2002::2, weight 1, 00:00:06
+  S>* 2005::/64 [1/0] is directly connected, sr0, seg6 2001:db8:aaaa::7,2002::4,2002::3,2002::2, weight 1, 00:00:06
 
 STATIC also supports steering of IPv4 traffic over an SRv6 SID list, as shown in the example below.
 
@@ -212,33 +212,33 @@ STATIC also supports steering of IPv4 traffic over an SRv6 SID list, as shown in
   [..]
   S>* 10.0.0.0/24 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00::, weight 1, 00:00:06
 
-  Optionally, the user can specify the SRv6 Headend Behavior to be used for encapsulation. Currently, STATIC supports the following behaviors:
+Optionally, the user can specify the SRv6 Headend Behavior to be used for encapsulation. Currently, STATIC supports the following behaviors:
 
-  * H.Encaps
-  * H.Encaps.Red
+ * H.Encaps
+ * H.Encaps.Red
 
-  When the behavior is not specified, STATIC defaults to using H.Encaps.
+When the behavior is not specified, STATIC defaults to using H.Encaps.
 
-.. clicmd:: ipv6 route X:X::X:X <X:X::X:X|nexthop> segments U:U::U:U/Y:Y::Y:Y/Z:Z::Z:Z [encap-behavior BEHAVIOR]
-.. clicmd:: ip route A.B.C.D <A.B.C.D|nexthop> segments U:U::U:U/Y:Y::Y:Y/Z:Z::Z:Z [encap-behavior BEHAVIOR]
+.. clicmd:: ipv6 route X:X::X:X <X:X::X:X|nexthop> segments U:U::U:U/Y:Y::Y:Y/Z:Z::Z:Z [encap-behavior <H_Encaps|H_Encaps_Red>]
+.. clicmd:: ip route A.B.C.D <A.B.C.D|nexthop> segments U:U::U:U/Y:Y::Y:Y/Z:Z::Z:Z [encap-behavior <H_Encaps|H_Encaps_Red>]
 
 ::
 
-  router(config)# ipv6 route 2001:db8:1:1::1/128 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H.Encaps
-  router(config)# ipv6 route 2001:db8:1:1::2/128 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H.Encaps.Red
+  router(config)# ipv6 route 2001:db8:1:1::1/128 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H_Encaps
+  router(config)# ipv6 route 2001:db8:1:1::2/128 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H_Encaps_Red
 
   router# show ipv6 route
   [..]
-  S>* 2001:db8:1:1::1/128 [1/0] is directly connected, ens3, seg6 fcbb:bbbb:1:2:3:fe00:: encap behavior H.Encaps, weight 1, 00:00:06
-  S>* 2001:db8:1:1::2/128 [1/0] is directly connected, ens3, seg6 fcbb:bbbb:1:2:3:fe00:: encap behavior H.Encaps.Red, weight 1, 00:00:06
+  S>* 2001:db8:1:1::1/128 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00::, weight 1, 00:00:06
+  S>* 2001:db8:1:1::2/128 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00::, encap behavior H.Encaps.Red, weight 1, 00:00:06
 
-  router(config)# ip route 10.0.0.1/32 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H.Encaps
-  router(config)# ip route 10.0.0.2/32 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H.Encaps.Red
+  router(config)# ip route 10.0.0.1/32 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H_Encaps
+  router(config)# ip route 10.0.0.2/32 sr0 segments fcbb:bbbb:1:2:3:fe00:: encap-behavior H_Encaps_Red
 
   router# show ip route
   [..]
-  S>* 10.0.0.1/32 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00:: encap behavior H.Encaps, weight 1, 00:00:06
-  S>* 10.0.0.2/32 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00:: encap behavior H.Encaps.Red, weight 1, 00:00:06
+  S>* 10.0.0.1/32 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00::, weight 1, 00:00:06
+  S>* 10.0.0.2/32 [1/0] is directly connected, sr0, seg6 fcbb:bbbb:1:2:3:fe00::, encap behavior H.Encaps.Red, weight 1, 00:00:06
 
 SRv6 Static SIDs Commands
 =========================

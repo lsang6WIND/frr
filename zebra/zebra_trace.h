@@ -186,7 +186,7 @@ TRACEPOINT_EVENT(
 		int, type,
 		uint32_t, filter_mask),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, netlink_cmd, netlink_cmd)
+		ctf_integer_hex(intptr_t, netlink_cmd, (intptr_t)netlink_cmd)
 		ctf_integer(int, family, family)
 		ctf_integer(int, type, type)
 		ctf_integer(uint32_t, filter_mask, filter_mask)
@@ -201,7 +201,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -215,7 +215,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -229,7 +229,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -243,7 +243,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -257,7 +257,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -271,7 +271,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -286,7 +286,7 @@ TRACEPOINT_EVENT(
 		ns_id_t, ns_id,
 		int, startup),
 	TP_FIELDS(
-		ctf_integer_hex(intptr_t, header, header)
+		ctf_integer_hex(intptr_t, header, (intptr_t)header)
 		ctf_integer(uint32_t, ns_id, ns_id)
 		ctf_integer(uint32_t, startup, startup)
 		)
@@ -457,6 +457,28 @@ TRACEPOINT_EVENT(
 )
 
 TRACEPOINT_LOGLEVEL(frr_zebra, zebra_nhg_dplane_result, TRACE_INFO)
+
+/*
+ * Route dataplane context init aborted: kernel nexthop group not yet installed
+ * or queued. Scalar fields only for lightweight tracing.
+ */
+TRACEPOINT_EVENT(
+	frr_zebra,
+	dplane_ctx_route_kernel_nhg_not_ready,
+	TP_ARGS(
+		enum dplane_op_e, op,
+		uint32_t, nhe_id,
+		uint32_t, nhe_flags,
+		vrf_id_t, vrf_id),
+	TP_FIELDS(
+		ctf_integer(uint32_t, op, op)
+		ctf_integer(uint32_t, nhe_id, nhe_id)
+		ctf_integer(uint32_t, nhe_flags, nhe_flags)
+		ctf_integer(vrf_id_t, vrf_id, vrf_id)
+	)
+)
+
+TRACEPOINT_LOGLEVEL(frr_zebra, dplane_ctx_route_kernel_nhg_not_ready, TRACE_INFO)
 
 TRACEPOINT_EVENT(
 	frr_zebra,

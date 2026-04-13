@@ -85,7 +85,7 @@ struct bgp_dest {
 
 	STAILQ_ENTRY(bgp_dest) pq;
 
-	struct zebra_announce_item zai;
+	struct bgp_bp_install_node *za_inode;
 	struct bgp_path_info *za_bgp_pi;
 	struct bgpevpn *za_vpn;
 	bool za_is_sync;
@@ -112,6 +112,7 @@ struct bgp_dest {
 #define BGP_NODE_SCHEDULE_FOR_INSTALL	(1 << 10)
 #define BGP_NODE_SCHEDULE_FOR_DELETE	(1 << 11)
 #define BGP_NODE_NHT_RESOLVED_NODE	(1 << 12)
+#define BGP_NODE_ZEBRA_ANNOUNCE_EARLY	(1 << 13)
 
 	struct bgp_addpath_node_data tx_addpath;
 
@@ -121,7 +122,7 @@ struct bgp_dest {
 	struct bgp_path_info_mpath *mpath;
 };
 
-DECLARE_LIST(zebra_announce, struct bgp_dest, zai);
+DECLARE_LIST(zebra_announce, struct bgp_bp_install_node, zai);
 
 extern void bgp_delete_listnode(struct bgp_dest *dest);
 /*

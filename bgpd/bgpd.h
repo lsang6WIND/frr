@@ -21,6 +21,17 @@
 PREDECL_LIST(zebra_announce);
 PREDECL_LIST(zebra_l2_vni);
 
+enum bgp_bp_install_type {
+	BGP_BP_INSTALL_ROUTE,
+};
+
+struct bgp_bp_install_node {
+	struct zebra_announce_item zai;
+	enum bgp_bp_install_type type;
+	void *ptr;
+	bool early_queue;
+};
+
 /* For union sockunion.  */
 #include "queue.h"
 #include "sockunion.h"
@@ -219,6 +230,7 @@ struct bgp_master {
 
 	/* To preserve ordering of installations into zebra across all Vrfs */
 	struct zebra_announce_head zebra_announce_head;
+	struct zebra_announce_head zebra_announce_early_head;
 
 	struct event *t_bgp_zebra_l2_vni;
 	/* To preserve ordering of processing of L2 VNIs in BGP */
@@ -268,6 +280,8 @@ struct srv6_policy {
 	struct srv6_locator *sid_locator;
 	struct in6_addr *zebra_sid_last_sent;
 	char *rmap_name;
+	uint32_t flags;
+#define SRV6_POLICY_FLAG_BEHAVIOR_DT46 (1 << 0)
 };
 
 struct vpn_policy {
@@ -488,14 +502,6 @@ PREDECL_DLIST(bgp_clearing_info);
 /* Hash of peers in clearing info object */
 PREDECL_HASH(bgp_clearing_hash);
 
-/* List of dests that need to be processed in a clearing batch */
-PREDECL_LIST(bgp_clearing_destlist);
-
-struct bgp_clearing_dest {
-	struct bgp_dest *dest;
-	struct bgp_clearing_destlist_item link;
-};
-
 /* Info about a batch of peers that need to be cleared from the RIB.
  * If many peers need to be cleared, we process them in batches, taking
  * one walk through the RIB for each batch. This is only used for "all"
@@ -513,9 +519,6 @@ struct bgp_clearing_info {
 
 	/* Flags */
 	uint32_t flags;
-
-	/* List of dests - wrapped by a small wrapper struct */
-	struct bgp_clearing_destlist_head destlist;
 
 	/* Event to schedule/reschedule processing */
 	struct event *t_sched;
@@ -549,6 +552,13 @@ struct bgp_clearing_info {
 #define BGP_CLEARING_INFO_FLAG_RESUME (1 << 1)
 /* Batch has 'inner' resume info set */
 #define BGP_CLEARING_INFO_FLAG_INNER (1 << 2)
+
+/*
+ * Helper macro to check if a SAFI supports nexthop prefer-global.
+ * Currently limited to IPv6 UNICAST, MULTICAST, and LABELED_UNICAST.
+ */
+#define BGP_IPV6_SAFI_SUPPORTS_NEXTHOP_PREFER_GLOBAL(safi)                                        \
+	((safi) == SAFI_UNICAST || (safi) == SAFI_MULTICAST || (safi) == SAFI_LABELED_UNICAST)
 
 /* BGP instance structure.  */
 struct bgp {
@@ -1084,6 +1094,16 @@ struct bgp {
 	bool allow_martian;
 
 	enum asnotation_mode asnotation;
+
+	/*
+	 * IPv6 nexthop prefer-global configuration.
+	 * When enabled, prefer global IPv6 addresses over link-local
+	 * addresses when both are available as nexthops.
+	 */
+	bool nexthop_prefer_global[AFI_MAX][SAFI_MAX];
+
+	/* Number of dests queued in the global zebra_announce_head for this instance */
+	uint32_t zebra_announce_queue_cnt;
 
 	/* BGP route flap dampening configuration */
 	struct bgp_damp_config damp[AFI_MAX][SAFI_MAX];
@@ -1812,6 +1832,7 @@ struct peer {
 #define PEER_FLAG_IP_TRANSPARENT     (1ULL << 45) /* ip-transparent */
 #define PEER_FLAG_RPKI_STRICT	     (1ULL << 46) /* RPKI strict mode */
 #define PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW (1ULL << 47)
+#define PEER_FLAG_REMOTE_AS		      (1ULL << 48) /* remote-as override */
 
 	/*
 	 *GR-Disabled mode means unset PEER_FLAG_GRACEFUL_RESTART
@@ -2508,11 +2529,9 @@ enum bgp_create_error_code {
 	BGP_ERR_INVALID_VALUE = -1,
 	BGP_ERR_INVALID_FLAG = -2,
 	BGP_ERR_INVALID_AS = -3,
-	BGP_ERR_PEER_GROUP_MEMBER = -4,
 	BGP_ERR_PEER_GROUP_NO_REMOTE_AS = -5,
 	BGP_ERR_PEER_GROUP_CANT_CHANGE = -6,
 	BGP_ERR_PEER_GROUP_MISMATCH = -7,
-	BGP_ERR_PEER_GROUP_PEER_TYPE_DIFFERENT = -8,
 	BGP_ERR_AS_MISMATCH = -9,
 	BGP_ERR_PEER_FLAG_CONFLICT = -10,
 	BGP_ERR_PEER_GROUP_SHUTDOWN = -11,
@@ -3301,16 +3320,9 @@ extern void bgp_session_reset_safe(struct peer *peer, struct listnode **nnode);
  * else return 'false'.
  */
 bool bgp_clearing_batch_add_peer(struct bgp *bgp, struct peer *peer);
-/* Add a prefix/dest to a clearing batch */
-void bgp_clearing_batch_add_dest(struct bgp_clearing_info *cinfo,
-				 struct bgp_dest *dest);
 /* Check whether a dest's peer is relevant to a clearing batch */
 bool bgp_clearing_batch_check_peer(struct bgp_clearing_info *cinfo,
 				   const struct peer *peer);
-/* Check whether a clearing batch has any dests to process */
-bool bgp_clearing_batch_dests_present(struct bgp_clearing_info *cinfo);
-/* Returns the next dest for batch clear processing */
-struct bgp_dest *bgp_clearing_batch_next_dest(struct bgp_clearing_info *cinfo);
 /* Done with a peer clearing batch; deal with refcounts, free memory */
 void bgp_clearing_batch_completed(struct bgp_clearing_info *cinfo);
 /* Start a new batch of peers to clear */
