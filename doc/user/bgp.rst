@@ -1166,14 +1166,24 @@ BGP GR Show Commands
 BGP Show Neighbors Brief Command
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. clicmd:: show [ip] bgp [<view|vrf> VIEWVRFNAME] [<ipv4|ipv6>] neighbors [<A.B.C.D|X:X::X:X|WORD>] [brief] [json]
+.. clicmd:: show [ip] bgp [<view|vrf> VIEWVRFNAME] [<ipv4|ipv6>] neighbors [<A.B.C.D|X:X::X:X|WORD>] [graceful-restart] [json [brief [established|failed]]]
 
-   Display BGP neighbor information. When the ``brief`` option is included, output
-   is shortened to one line per neighbor (text) or a reduced JSON structure
-   (hostname, remoteAs, localAs, lastResetDueTo, status, lastResetTimerMsecs,
-   messageStats with totalSent/totalRecv, and addressFamilyInfo with
-   acceptedPrefixCounter/sentPrefixCounter per AFI/SAFI). Optional ``json``
-   formats the output as JSON.
+   Display BGP neighbor information. Without ``json``, output is the usual
+   detailed text. With ``json``, output is full neighbor detail in JSON.
+
+   The ``brief`` keyword is only valid together with ``json``. Use ``json brief``
+   for a reduced JSON object per neighbor (hostname, remoteAs, localAs,
+   lastResetDueTo, status, lastResetTimerMsecs, messageStats with
+   totalSent/totalRecv, and addressFamilyInfo with acceptedPrefixCounter and
+   sentPrefixCounter per AFI/SAFI).
+
+   After ``json brief``, you may add ``established`` to include only neighbors in
+   Established state, or ``failed`` for neighbors not in Established (for
+   example Idle, Active, Connect).
+
+   ``graceful-restart`` shows graceful-restart-related neighbor information; it
+   may be combined with ``json`` as in the command grammar above. See also
+   :clicmd:`show bgp [<ipv4|ipv6>] [<view|vrf> VRF] neighbors [<A.B.C.D|X:X::X:X|WORD>] graceful-restart [json]`.
 
 Long-lived Graceful Restart
 ---------------------------
@@ -5574,12 +5584,34 @@ status in FIB:
 7. If the route which is already installed in dataplane is removed for some
    reason, sending withdraw message to peers is not currently supported.
 
-.. clicmd:: bgp suppress-fib-pending
+.. clicmd:: bgp suppress-fib-pending [(0-10000)]
 
    This command is applicable at the global level and at an individual
    bgp level.  If applied at the global level all bgp instances will
    wait for fib installation before announcing routes and there is no
    way to turn it off for a particular bgp vrf.
+
+   An optional advertisement delay in milliseconds can be specified to control
+   how long BGP waits after FIB installation before advertising routes to
+   peers. This provides a batching window that groups multiple route
+   advertisements into fewer BGP UPDATE messages.
+
+   The default delay is 1000 milliseconds. Setting the delay to ``0``
+   disables the batching window and advertises routes immediately after FIB
+   confirmation, which reduces convergence latency at the cost of more frequent
+   UPDATE messages. During bulk convergence, zebra already batch-processes FIB
+   confirmations, providing natural batching even with a low delay value.
+
+   Examples::
+
+      ! Enable with default 1000ms delay
+      bgp suppress-fib-pending
+
+      ! Enable with custom 50ms delay for low-latency environments
+      bgp suppress-fib-pending 50
+
+      ! Enable with no post-FIB batching delay
+      bgp suppress-fib-pending 0
 
 .. _routing-policy:
 

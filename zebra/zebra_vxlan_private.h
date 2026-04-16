@@ -16,6 +16,7 @@
 #include "zebra_vxlan_if.h"
 #include "zebra_evpn.h"
 #include "zebra_evpn_mac.h"
+#include "zebra_evpn_neigh.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,7 +58,7 @@ struct zebra_l3vni {
 	struct hash *rmac_table;
 
 	/* list of remote vtep-ip neigh */
-	struct hash *nh_table;
+	struct zebra_neigh_db_head nh_table[1];
 };
 
 #define IS_ZL3VNI_SVD_BACKED(zl3vni)                                           \

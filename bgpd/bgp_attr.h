@@ -108,6 +108,11 @@ enum pta_type {
 	PMSI_TNLTYPE_MAX = PMSI_TNLTYPE_MLDP_MP2MP
 };
 
+/* PMSI lengths for label-only, ipv4, and ipv6 "identifier" */
+#define BGP_ATTR_PMSI_TUNNEL_LBL_ONLY_LEN 5
+#define BGP_ATTR_PMSI_TUNNEL_V4_LENGTH    9
+#define BGP_ATTR_PMSI_TUNNEL_V6_LENGTH    21
+
 /*
  * Prefix-SID type-4
  * SRv6-VPN-SID-TLV
@@ -217,6 +222,7 @@ struct attr {
 
 	/* PMSI tunnel type (RFC 6514). */
 	enum pta_type pmsi_tnl_type;
+	struct in6_addr tunn_id; /* PMSI Tunnel Id */
 
 	/* Multi-Protocol Nexthop, AFI IPv6 */
 	struct in6_addr mp_nexthop_global;
@@ -485,21 +491,16 @@ extern enum bgp_attr_parse_ret bgp_attr_nexthop_valid(struct peer *peer,
 
 extern uint32_t bgp_attr_get_color(struct attr *attr);
 
-static inline bool bgp_rmap_nhop_changed(uint32_t out_rmap_flags,
-					 uint32_t in_rmap_flags)
+static inline bool bgp_rmap_nhop_changed(uint32_t out_rmap_flags)
 {
 	return ((CHECK_FLAG(out_rmap_flags, BATTR_RMAP_NEXTHOP_PEER_ADDRESS) ||
 		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_NEXTHOP_UNCHANGED) ||
 		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_IPV4_NHOP_CHANGED) ||
 		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_VPNV4_NHOP_CHANGED) ||
-		 CHECK_FLAG(out_rmap_flags,
-			    BATTR_RMAP_VPNV6_GLOBAL_NHOP_CHANGED) ||
-		 CHECK_FLAG(out_rmap_flags,
-			    BATTR_RMAP_IPV6_GLOBAL_NHOP_CHANGED) ||
-		 CHECK_FLAG(out_rmap_flags,
-			    BATTR_RMAP_IPV6_PREFER_GLOBAL_CHANGED) ||
-		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_IPV6_LL_NHOP_CHANGED) ||
-		 CHECK_FLAG(in_rmap_flags, BATTR_RMAP_NEXTHOP_UNCHANGED))
+		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_VPNV6_GLOBAL_NHOP_CHANGED) ||
+		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_IPV6_GLOBAL_NHOP_CHANGED) ||
+		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_IPV6_PREFER_GLOBAL_CHANGED) ||
+		 CHECK_FLAG(out_rmap_flags, BATTR_RMAP_IPV6_LL_NHOP_CHANGED))
 			? true
 			: false);
 }
@@ -509,7 +510,7 @@ static inline uint32_t mac_mobility_seqnum(struct attr *attr)
 	return (attr) ? attr->mm_seqnum : 0;
 }
 
-static inline enum pta_type bgp_attr_get_pmsi_tnl_type(struct attr *attr)
+static inline enum pta_type bgp_attr_get_pmsi_tnl_type(const struct attr *attr)
 {
 	return attr->pmsi_tnl_type;
 }
