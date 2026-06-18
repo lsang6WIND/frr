@@ -329,6 +329,7 @@ int pim_socket_leave(int fd, pim_addr group, pim_addr ifaddr, ifindex_t ifindex,
 		flog_err(EC_LIB_SOCKET,
 			 "Failure socket leaving fd=%d group %pPAs on interface address %pPAs: %m",
 			 fd, &group, &ifaddr);
+		/* We don't track socket leave errors; reuse joins_failed. */
 		pim_ifp->igmp_ifstat_joins_failed++;
 		return ret;
 	}
@@ -443,6 +444,16 @@ int pim_socket_recvfromto(int fd, uint8_t *buf, size_t len,
 	err = recvmsg(fd, &msgh, 0);
 	if (err < 0)
 		return err;
+
+	/*
+	 * Datagram was larger than the supplied buffer; ip_hdr->ip_len can
+	 * still describe the full wire size. Drop so callers never trust
+	 * length fields against a truncated buffer.
+	 */
+	if (msgh.msg_flags & MSG_TRUNC) {
+		errno = EMSGSIZE;
+		return -1;
+	}
 
 	if (fromlen)
 		*fromlen = msgh.msg_namelen;

@@ -332,7 +332,7 @@ module frr-pim {
     leaf dm-prefix-list {
         type plist-ref;
         description
-          "Prefix-list used to define Dennse Mode Multicast address range.";
+          "Prefix-list used to define Dense Mode Multicast address range.";
     }
 
 
@@ -589,7 +589,11 @@ module frr-pim {
     leaf neighbor-filter-prefix-list {
       type plist-ref;
       description
-        "Prefix-List to filter allowed PIM neighbors.";
+        "Optional prefix list restricting which IP source addresses may act as PIM
+         neighbors on this interface (evaluated for Hello, Join/Prune, and Assert
+         processing alongside other PIM interface checks). This is an additional
+         operator filter only; it does not independently enforce IPv6 link-local or
+         IPv4 connected-subnet requirements on the packet source.";
     }
 
     leaf join-prune-interval {

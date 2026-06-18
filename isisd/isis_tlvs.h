@@ -596,8 +596,8 @@ enum ext_subtlv_size {
 	ISIS_SUBTLV_MAX_SIZE = 180,
 
 	/* RFC 9352 sections #8.1 & #8.2 */
-	ISIS_SUBTLV_SRV6_ENDX_SID_SIZE = 21,
-	ISIS_SUBTLV_SRV6_LAN_ENDX_SID_SIZE = 27,
+	ISIS_SUBTLV_SRV6_ENDX_SID_SIZE = 22,
+	ISIS_SUBTLV_SRV6_LAN_ENDX_SID_SIZE = 28,
 
 	/* draft-ietf-lsr-isis-srv6-extensions */
 	ISIS_SUBSUBTLV_SID_STRUCTURE_SIZE = 4,
@@ -757,6 +757,7 @@ struct isis_subsubtlvs *isis_alloc_subsubtlvs(enum isis_tlv_context context);
 int isis_unpack_tlvs(size_t avail_len, struct stream *stream, struct isis_tlvs **dest,
 		     const char **error_log);
 const char *isis_format_tlvs(struct isis_tlvs *tlvs, struct json_object *json);
+void isis_tlvs_terminate(void);
 struct isis_tlvs *isis_copy_tlvs(struct isis_tlvs *tlvs);
 struct list *isis_fragment_tlvs(struct isis_tlvs *tlvs, size_t size);
 

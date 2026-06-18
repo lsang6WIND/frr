@@ -159,6 +159,9 @@ int ospf_mpls_te_init(void)
 
 void ospf_mpls_te_term(void)
 {
+	/* Release imported/exported TE link-state database on daemon exit. */
+	ls_ted_del_all(&OspfMplsTE.ted);
+
 	list_delete(&OspfMplsTE.iflist);
 
 	ospf_delete_opaque_functab(OSPF_OPAQUE_AREA_LSA,
@@ -177,6 +180,8 @@ void ospf_mpls_te_term(void)
 
 void ospf_mpls_te_finish(void)
 {
+	ls_ted_del_all(&OspfMplsTE.ted);
+
 	OspfMplsTE.enabled = false;
 	OspfMplsTE.inter_as = Off;
 	OspfMplsTE.export = false;
@@ -1668,8 +1673,8 @@ static struct ls_edge *get_edge(struct ls_ted *ted, struct ls_node_id adv,
 	struct ls_attributes *attr;
 
 	/* Check that Link ID and Node ID are valid */
-	if (IPV4_NET0(link_id.s_addr) || IPV4_NET0(adv.id.ip.addr.s_addr) ||
-	    adv.origin != OSPFv2)
+	if (IPV4_NET0(ntohl(link_id.s_addr)) ||
+	    IPV4_NET0(ntohl(adv.id.ip.addr.s_addr)) || adv.origin != OSPFv2)
 		return NULL;
 
 	/* Search Edge that corresponds to the Link ID */
@@ -1894,13 +1899,12 @@ static int ospf_te_parse_router_lsa(struct ls_ted *ted, struct ospf_lsa *lsa)
 	else
 		type = STANDARD;
 
-	if (vertex->status == NEW) {
-		vertex->node->type = type;
-		SET_FLAG(vertex->node->flags, LS_NODE_TYPE);
-	} else if (vertex->node->type != type) {
-		vertex->node->type = type;
+	if (vertex->status != NEW &&
+	    (vertex->node->type != type || !CHECK_FLAG(vertex->node->flags, LS_NODE_TYPE)))
 		vertex->status = UPDATE;
-	}
+
+	vertex->node->type = type;
+	SET_FLAG(vertex->node->flags, LS_NODE_TYPE);
 
 	/* Check if Vertex has been modified */
 	if (vertex->status != SYNC) {
@@ -2866,6 +2870,11 @@ static int ospf_te_parse_ext_pref(struct ls_ted *ted, struct ospf_lsa *lsa)
 	}
 
 	/* Initialize TLV browsing */
+	if (len < TLV_HDR_SIZE + EXT_TLV_PREFIX_SIZE + EXT_SUBTLV_PREFIX_SID_SIZE) {
+		ote_debug("  |- Wrong TLV size for PREFIX_SID_SUBTLV: %u", (uint32_t)len);
+		return -1;
+	}
+
 	ls_pref = subnet->ls_pref;
 	pref_sid = (struct ext_subtlv_prefix_sid *)((char *)(ext) + TLV_HDR_SIZE
 						    + EXT_TLV_PREFIX_SIZE);

@@ -82,7 +82,7 @@ Functions
 ^^^^^^^^^
 
 A set of functions is provided to create, delete and compare Link State
-Node, Atribute and Prefix:
+Node, Attribute and Prefix:
 
 .. c:function:: struct ls_node *ls_node_new(struct ls_node_id adv, struct in_addr router_id, struct in6_addr router6_id)
 .. c:function:: struct ls_attributes *ls_attributes_new(struct ls_node_id adv, struct in_addr local, struct in6_addr local6, uint32_t local_id)
@@ -184,9 +184,18 @@ Vertex, Edges and Subnets management functions
 .. c:function:: struct ls_edge *ls_edge_add(struct ls_ted *ted, struct ls_attributes *attributes)
 .. c:function:: struct ls_subnet *ls_subnet_add(struct ls_ted *ted, struct ls_prefix *pref)
 
-   Add, respectively new Vertex, Edge or Subnet to the Link State Datebase.
+   Add, respectively new Vertex, Edge or Subnet to the Link State Database.
    Vertex, Edge or Subnet are created from, respectively the Link State Node,
    Attribute or Prefix structure. Data structure are dynamically allocated.
+
+   **NOTE:** TED is based on an RB_TREE_UNIQ data structure. Thus, if a Vertex,
+   Edge or Subnet with the same key already exists in the TED, the new one is
+   not added and pointer to the existing element is returned. It is up to the
+   caller to check if the returned element is NULL (element has been inserted
+   in the TED) or the current element in case insertion failed. Free new element
+   in case or error is also up to the caller. 'ls_find_xxx()' functions could
+   be used prior to call 'ls_xxx_add()' functions to check if an element already
+   exists in the TED.
 
 .. c:function:: struct ls_vertex *ls_vertex_update(struct ls_ted *ted, struct ls_node *node)
 .. c:function:: struct ls_edge *ls_edge_update(struct ls_ted *ted, struct ls_attributes *attributes)
@@ -223,8 +232,8 @@ Vertex, Edges and Subnets management functions
 .. c:function:: struct ls_edge *ls_find_edge_by_source(struct ls_ted *ted, struct ls_attributes *attributes);
 .. c:function:: struct ls_edge *ls_find_edge_by_destination(struct ls_ted *ted, struct ls_attributes *attributes);
 
-   Find Edge in the Link State Data Base by its key, source or distination
-   (local IPv4 or IPv6 address or local ID) informations of the Link State
+   Find Edge in the Link State Data Base by its key, source or destination
+   (local IPv4 or IPv6 address or local ID) information of the Link State
    Attributes. Return Edge if found, NULL otherwise.
 
 .. c:function:: struct ls_subnet *ls_find_subnet(struct ls_ted *ted, const struct prefix prefix)
@@ -337,7 +346,7 @@ message sequences are as follows:
   Multicast method in order to receive the complete Link State Database from a
   *Producer*. ZEBRA daemon forwards this message to any *Producer* daemons that
   previously registered to this message. If no *Producer* has yet registered,
-  the request is lost. Thus, if the *Consumer* receives no response whithin a
+  the request is lost. Thus, if the *Consumer* receives no response within a
   given timer, it means that no *Producer* are available right now. So, the
   *Consumer* must send the same request until it receives a Link State Database
   Synchronistation message. This behaviour is necessary as we can't control in
@@ -444,6 +453,16 @@ Functions
 .. c:function:: int ls_request_sync(struct zclient *zclient)
 
    Request initial Synchronisation to collect the whole Link State Database.
+
+   **NOTE:** Before consumer call 'ls_request_sync()' function, it is up to
+   the caller to verify that the TED is empty to avoid any confusion between
+   the initial synchronisation and any existing data. 'ls_ted_clean()' function
+   could be used for that purpose. If cleaning TED is not possible, it is up
+   to the caller to reconcille existing TED elements and new ones received
+   during synchronisation. For that purpose, ORPHAN status could be used:
+   First, mark all elements in the TED as ORPHAN, then request TED sync.
+   Once got all SYNC messages, search for ORPHAN elements in the TED in order
+   to remove them or take appropriate action.
 
 .. c:function:: struct ls_message *ls_parse_msg(struct stream *s)
 

@@ -449,7 +449,7 @@ bool ecommunity_node_target_match(struct ecommunity *ecom,
 	bool match = false;
 
 	if (!ecom || !ecom->size)
-		return NULL;
+		return false;
 
 	for (i = 0; i < ecom->size; i++) {
 		const uint8_t *pnt;
@@ -598,7 +598,7 @@ static const char *ecommunity_gettoken(const char *str, void *eval_ptr,
 		p++;
 		if (tolower((unsigned char)*p) == 't') {
 			p++;
-			if (*p != '\0' && tolower((int)*p) == '6')
+			if (*p != '\0' && tolower((unsigned char)*p) == '6')
 				*token = ecommunity_token_rt6;
 			else
 				*token = ecommunity_token_rt;
@@ -682,9 +682,10 @@ static const char *ecommunity_gettoken(const char *str, void *eval_ptr,
 	/* IPv6 case : look for last ':' */
 	if (*token == ecommunity_token_rt6 ||
 	    *token == ecommunity_token_val6) {
-		char *limit;
+		const char *limit;
 
-		limit = endptr = strrchr(p, ':');
+		limit = strrchr(p, ':');
+		endptr = (char *)limit;
 		if (!endptr)
 			goto error;
 
@@ -715,7 +716,7 @@ static const char *ecommunity_gettoken(const char *str, void *eval_ptr,
 			goto error;
 
 		*token = ecommunity_token_val6;
-		while (isdigit((int)*p) || *p == ':' || *p == '.') {
+		while (isdigit((unsigned char)*p) || *p == ':' || *p == '.') {
 			p++;
 		}
 		return p;
@@ -1157,22 +1158,35 @@ static char *_ecommunity_ecom2str(struct ecommunity *ecom, int format, int filte
 	uint8_t sub_type = 0;
 	int str_size;
 	char *str_buf;
+	char encbuf[128];
 
 	if (!ecom || ecom->size == 0)
 		return XCALLOC(MTYPE_ECOMMUNITY_STR, 1);
 
-	/* ecom strlen + space + null term */
-	str_size = (ecom->size * (ECOMMUNITY_STRLEN + 1)) + 1;
-	str_buf = XCALLOC(MTYPE_ECOMMUNITY_STR, str_size);
+	if (index != -1 && (uint32_t)index >= ecom->size)
+		return XCALLOC(MTYPE_ECOMMUNITY_STR, 1);
 
-	char encbuf[128];
+	/* ecom strlen + space + null term */
+	if (index == -1)
+		str_size = (ecom->size * (ECOMMUNITY_STRLEN + 1)) + 1;
+	else
+		str_size = (ECOMMUNITY_STRLEN + 1) + 1;
+
+	str_buf = XCALLOC(MTYPE_ECOMMUNITY_STR, str_size);
 
 	for (i = 0; i < ecom->size; i++) {
 		bool unk_ecom = false;
+
+		/* If we're only formatting one item, stop when we've found it */
+		if (index != -1) {
+			if (i < (uint32_t)index)
+				continue;
+			else if (i > (uint32_t)index)
+				break;
+		}
+
 		memset(encbuf, 0x00, sizeof(encbuf));
 
-		if (index != -1 && (uint32_t)index != i)
-			continue;
 		/* Space between each value.  */
 		if (index == -1 && i > 0)
 			strlcat(str_buf, " ", str_size);
@@ -1423,8 +1437,6 @@ static char *_ecommunity_ecom2str(struct ecommunity *ecom, int format, int filte
 						   ~ECOMMUNITY_ENCODE_TRANS_EXP),
 					ECOMMUNITY_ROUTE_TARGET,
 					ECOMMUNITY_FORMAT_DISPLAY);
-				snprintf(encbuf, sizeof(encbuf),
-					 "FS:redirect VRF %s", buf);
 				snprintf(encbuf, sizeof(encbuf),
 					 "FS:redirect VRF %s", buf);
 			} else if (type != ECOMMUNITY_ENCODE_TRANS_EXP)

@@ -13,7 +13,22 @@ network for optimizing forwarding of overlay BUM traffic.
 
 .. note::
 
-   On Linux for PIM-SM operation you *must* have kernel version 4.19 or greater.
+   On Linux, kernel version 4.19 or greater is *recommended* for PIM-SM (ASM).
+   Kernels from 4.19 onward deliver the ``IGMPMSG_WRVIFWHOLE`` upcall, which
+   carries the ingress interface and the full packet.  That path drives
+   first-hop router (FHR) activation and PIM register encapsulation of the
+   first data packet to the RP.
+
+   On Linux kernels older than 4.19 (for example some RHEL/Rocky 8 systems),
+   only ``IGMPMSG_WRONGVIF`` is available.  *pimd* detects this at runtime and
+   compensates via the WRONGVIF handler for several cases (join-before-data,
+   source and receiver on the same LAN, LHR / SPT switch, and ``(S,G)``
+   MFC recovery after *pimd* restart).  This support is best-effort: WRONGVIF
+   does not include the packet buffer, so register encapsulation of the
+   first data packet still requires ``IGMPMSG_WRVIFWHOLE`` (kernel >= 4.19).
+   On kernels that deliver WRVIFWHOLE, compensation is not used after the
+   first such upcall.
+
    To use PIM for EVPN BUM forwarding, kernels 5.0 or greater are required.
    OpenBSD has no multicast support and FreeBSD, and NetBSD only
    have support for SSM.
@@ -78,10 +93,12 @@ PIM Routers
    In order to use PIM, it is necessary to configure an RP for join messages to
    be sent to. FRR supports learning RP information dynamically via the AutoRP
    protocol and performs discovery by default. This command will disable the
-   AutoRP discovery protocol.
+   AutoRP discovery protocol. Any RP information previously learned via AutoRP
+   is removed immediately from the running configuration.
    All routers in the PIM network must agree on the network RP information, so
    all routers in the network should have AutoRP either enabled or disabled.
-   This command is VRF-aware.
+   Use ``autorp discovery`` to re-enable AutoRP discovery. This command is
+   VRF-aware.
 
 
 .. clicmd:: autorp announce A.B.C.D [A.B.C.D/M | group-list PREFIX_LIST]
@@ -97,6 +114,24 @@ PIM Routers
    seconds elapsed between advertise messages sent, defaults to 60. Hold time defines
    how long the AutoRP mapping agent will consider the information valid, setting to
    0 will disable expiration of the candidate RP information, defaults to 3 * interval.
+
+.. clicmd:: autorp send-rp-discovery [source <address A.B.C.D | interface IFNAME | loopback | any>]
+
+   Enable the AutoRP mapping agent on this router. The mapping agent listens for
+   candidate RP announcements, aggregates them, and sends AutoRP discovery
+   messages so other routers can learn RP information dynamically. By default the
+   source address is the highest loopback address. Use ``interface`` to select the
+   highest address on an interface, ``address`` to set an explicit address, or
+   ``any`` to use the highest address on any interface. Use ``no autorp
+   send-rp-discovery`` to disable the mapping agent. This command is VRF-aware.
+
+.. clicmd:: autorp send-rp-discovery {scope (0-255) | interval (1-65535) | holdtime (0-65535)}
+
+   Configure AutoRP mapping agent discovery messages. The scope defines the TTL
+   value in the messages to limit the scope, defaults to 31. Interval defines the
+   number of seconds elapsed between discovery messages sent, defaults to 60. Hold
+   time defines how long other routers should consider learned RP information
+   valid, defaults to 180 seconds.
 
 .. clicmd:: rp keep-alive-timer (1-65535)
    :daemon: pim
@@ -444,7 +479,7 @@ keyword at the end.
 .. clicmd:: ip pim [sm | dm | sm-dm]
 
    Enable PIM on this interface. PIM will use this interface to form PIM
-   neighborships and start exchaning PIM protocol messages with those
+   neighborships and start exchanging PIM protocol messages with those
    neighbors.
    The available modes of operation are:
 
@@ -512,7 +547,7 @@ keyword at the end.
    Join multicast group or source-group on an interface. This will result in
    an IGMP join happening through a local socket so that IGMP reports will be
    sent on this interface. It may also have the side effect of the kernel
-   forwarding multicast traffic to the socket unnessarily.
+   forwarding multicast traffic to the socket unnecessarily.
 
 .. clicmd:: ip igmp static-group A.B.C.D [A.B.C.D]
 
@@ -521,9 +556,92 @@ keyword at the end.
 
 .. clicmd:: ip igmp proxy
 
-   Tell PIM to send proxy IGMP reports for joins occuring on all other
+   Tell PIM to send proxy IGMP reports for joins occurring on all other
    interfaces on this interface. Join-groups on other interfaces will
    also be proxied. The default version is v3.
+
+.. clicmd:: ip igmp proxy route-map ROUTE-MAP
+
+   Apply a route-map to filter which multicast (S,G) entries are forwarded
+   via IGMP proxy on this interface. Only groups permitted by the route-map
+   will be proxied; all others are silently dropped.
+
+   This is evaluated at proxy join time: on initial proxy setup
+   (``ip igmp proxy``) and each time a new IGMP report arrives on another
+   interface. Changing the route-map takes effect on the next proxy
+   enable/disable cycle.
+
+   The following ``match`` statements are supported:
+
+   * ``match ip multicast-group A.B.C.D``
+   * ``match ip multicast-group prefix-list PREFIX-LIST``
+   * ``match ip multicast-source A.B.C.D``
+   * ``match ip multicast-source prefix-list PREFIX-LIST``
+   * ``match multicast-interface INTERFACE-NAME``
+   * ``match multicast-source-interface INTERFACE-NAME``
+
+   ``match multicast-source-interface`` matches against the inbound
+   interface for the filter decision. In a proxy filter that is the
+   interface where the IGMP/MLD report was **received** (the
+   upstream/listener-facing interface), which is distinct from the proxy
+   output interface. In a regular ``ip/ipv6 igmp/mld route-map`` (or a
+   PIM ``join-filter``) it is the interface processing the report or
+   join, in which case it behaves the same as ``match multicast-interface``.
+
+   This allows filtering proxy joins per source interface::
+
+      route-map PROXY_FILTER permit 10
+       match multicast-source-interface eth0
+
+      interface eth1
+       ip igmp proxy
+       ip igmp proxy route-map PROXY_FILTER
+
+   With this configuration, only groups reported on ``eth0`` are proxied
+   out ``eth1``.
+
+   **Indirect IGMPv2 vs IGMPv3 filtering**
+
+   There is no explicit ``match igmp-version`` condition, but IGMP version
+   can be distinguished indirectly through the source address:
+
+   * IGMPv2 joins and IGMPv3 ASM ``(*,G)`` reports both produce entries
+     with source ``0.0.0.0`` (wildcard).
+   * IGMPv3 SSM ``(S,G)`` reports carry a specific non-zero source address.
+
+   To proxy **only** IGMPv3 SSM joins (deny any-source entries)::
+
+      ip prefix-list ANY_SOURCE seq 5 permit 0.0.0.0/32
+
+      route-map PROXY_SSM_ONLY deny 10
+       match ip multicast-source prefix-list ANY_SOURCE
+      route-map PROXY_SSM_ONLY permit 20
+
+      interface eth1
+       ip igmp proxy
+       ip igmp proxy route-map PROXY_SSM_ONLY
+
+   To proxy **only** ASM / IGMPv2-style ``(*,G)`` entries (deny SSM)::
+
+      ip prefix-list ANY_SOURCE seq 5 permit 0.0.0.0/32
+
+      route-map PROXY_ASM_ONLY permit 10
+       match ip multicast-source prefix-list ANY_SOURCE
+
+      interface eth1
+       ip igmp proxy
+       ip igmp proxy route-map PROXY_ASM_ONLY
+
+   Example — proxy only groups in 239.0.0.0/8::
+
+      ip prefix-list PROXY_GROUPS seq 5 permit 239.0.0.0/8 le 32
+
+      route-map PROXY_FILTER permit 10
+       match ip multicast-group prefix-list PROXY_GROUPS
+
+      interface eth1
+       ip igmp proxy
+       ip igmp proxy route-map PROXY_FILTER
 
 .. clicmd:: ip igmp immediate-leave
 

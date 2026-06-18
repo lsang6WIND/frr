@@ -1508,6 +1508,28 @@ Redistribute routes from a routing table number into BGP.
    instance. Shows which protocols are being redistributed into BGP along with
    their associated metrics, instances, and route-maps if configured.
 
+.. clicmd:: show bgp [<view|vrf> VRFNAME] <ipv4|ipv6> unicast aggregate-address [A.B.C.D/M|X:X::X:X/M] [json]
+
+   Display runtime information for configured aggregate-address entries.
+   When a specific prefix is provided, shows details for that aggregate only.
+   The output includes:
+
+   - Summary-only and AS-set flags
+   - Origin (IGP/EGP/incomplete)
+   - Matching route count and origin breakdown (incomplete, EGP counts)
+   - MED state (match enabled, initialized, mismatched, value)
+   - Route-map and suppress-map names if configured
+   - Aggregated attributes (community, extended community, large community, AS path)
+
+   Example output::
+
+      Aggregate: 192.168.0.0/24
+        Summary-only: yes, AS-set: no
+        Origin: igp
+        Matching routes: 3 (incomplete: 0, egp: 0)
+        MED: match=yes, initialized=yes, mismatched=no, value=100
+        Suppress-map: my-suppress-map
+
 .. clicmd:: bgp update-delay MAX-DELAY
 
 .. clicmd:: bgp update-delay MAX-DELAY ESTABLISH-WAIT
@@ -1570,6 +1592,104 @@ Redistribute routes from a routing table number into BGP.
 
    On hitting any of the above two conditions, BGP resumes the decision process
    and generates updates to its peers.
+
+   Default max-delay is 0, i.e. the feature is off by default.
+
+
+.. clicmd:: bgp advertisement-delay (1-3600)
+
+   With ``update-delay``, both FIB programming and advertisements are deferred,
+   meaning the restarting router cannot forward local traffic until the delay
+   completes.  ``advertisement-delay`` takes a different approach: it allows
+   best-path selection and FIB programming to proceed normally so local
+   forwarding works immediately, while holding only the advertisements to
+   prevent the router from attracting remote traffic before it has a complete
+   routing state.
+
+   After a non-graceful restart, peers detect the session loss and withdraw
+   routes to this router, so the receiver has no routes to this router at all.
+   ``advertisement-delay`` controls when this router re-announces itself,
+   ensuring it only attracts traffic once it has fully converged.  When
+   graceful-restart is active, ``advertisement-delay`` is not started -- the
+   GR restarter path handles route retention separately.
+
+   This feature holds route advertisements to peers for a configured number of
+   seconds after the first peer reaches Established status.  The delay applies
+   to all address families (AFI/SAFI).  Note that this command is configured at
+   the global level and applies to all bgp instances/vrfs.  It cannot be used
+   at the same time as the per-vrf ``advertisement-delay`` command described
+   below.  The global and per-vrf approaches are mutually exclusive.
+
+   When the first peer reaches Established, a timer for the configured delay is
+   started.  During this period, best-path selection and FIB programming proceed
+   normally, but route advertisements to peers are held.  When the timer
+   expires, advertisements are released to all established peers.
+
+   When both ``update-delay`` and ``advertisement-delay`` are configured, both
+   timers start when the first peer reaches Established.  Route advertisements
+   are released at ``max(update-delay, advertisement-delay)``; whichever
+   finishes last triggers the release.
+
+   This feature runs after startup and also re-triggers on
+   ``clear bgp *``, similar to ``update-delay``.
+   It does not re-trigger if peers flap after the delay has completed.
+
+   Changing or removing this configuration while the timer is running takes
+   effect from the next startup or next ``clear bgp *``.
+
+   This parameter is unrelated to the per-neighbor or per-peer-group
+   ``advertisement-interval``, which controls the minimum time between
+   individual route advertisements to a specific peer.
+
+   Default max-delay is 0, i.e. the feature is off by default.
+
+
+.. clicmd:: advertisement-delay (1-3600)
+
+   With ``update-delay``, both FIB programming and advertisements are deferred,
+   meaning the restarting router cannot forward local traffic until the delay
+   completes.  ``advertisement-delay`` takes a different approach: it allows
+   best-path selection and FIB programming to proceed normally so local
+   forwarding works immediately, while holding only the advertisements to
+   prevent the router from attracting remote traffic before it has a complete
+   routing state.
+
+   After a non-graceful restart, peers detect the session loss and withdraw
+   routes to this router, so the receiver has no routes to this router at all.
+   ``advertisement-delay`` controls when this router re-announces itself,
+   ensuring it only attracts traffic once it has fully converged.  When
+   graceful-restart is active, ``advertisement-delay`` is not started -- the
+   GR restarter path handles route retention separately.
+
+   This feature holds route advertisements to peers for a configured number of
+   seconds after the first peer reaches Established status.  Note that this
+   command is configured under the specific bgp instance/vrf that the feature
+   is enabled for.  It cannot be used at the same time as the global
+   ``bgp advertisement-delay`` described above.  The global and per-vrf
+   approaches are mutually exclusive.
+
+   When the first peer reaches Established, a timer for the configured delay is
+   started.  During this period, best-path selection and FIB programming proceed
+   normally, but route advertisements to peers are held.  When the timer
+   expires, advertisements are released to all established peers.
+
+   When both ``update-delay`` and ``advertisement-delay`` are configured, both
+   timers start when the first peer reaches Established.  Route advertisements
+   are released at ``max(update-delay, advertisement-delay)``; whichever
+   finishes last triggers the release.
+
+   The delay applies to all address families (AFI/SAFI).
+
+   This feature runs after startup and also re-triggers on
+   ``clear bgp *``, similar to ``update-delay``.
+   It does not re-trigger if peers flap after the delay has completed.
+
+   Changing or removing this configuration while the timer is running takes
+   effect from the next startup or next ``clear bgp *``.
+
+   This parameter is unrelated to the per-neighbor or per-peer-group
+   ``advertisement-interval``, which controls the minimum time between
+   individual route advertisements to a specific peer.
 
    Default max-delay is 0, i.e. the feature is off by default.
 
@@ -1798,7 +1918,7 @@ Configuring Peers
    neighbour, may be specified as either an IP address directly or as an
    interface name (in which case the *zebra* daemon MUST be running in order
    for *bgpd* to be able to retrieve interface state).  When there are multiple
-   addresses on the choosen IFNAME then BGP will use the address that matches
+   addresses on the chosen IFNAME then BGP will use the address that matches
    the most number of bits in comparison to the destination peer address.
 
    .. code-block:: frr
@@ -1979,6 +2099,50 @@ Configuring Peers
 
    The parameter `origin` configures BGP to only accept routes originated with
    the same AS number as the system.
+
+   This command is only allowed for eBGP peers.
+
+.. clicmd:: neighbor <A.B.C.D|X:X::X:X|WORD> allowas-in route-map WORD [<(1-10)|origin>]
+
+   Accept incoming routes with AS path containing the system AS number, but only
+   for routes that match the specified route-map. This provides maximum flexibility
+   for selective AS-path loop prevention based on any BGP attributes.
+
+   Route-maps can match on prefixes, AS-path patterns, communities, extended communities, and
+   any other BGP attributes, allowing complex filtering logic.
+
+   The parameter ``WORD`` specifies the name of the route-map to use for matching.
+   Only routes that result in a ``permit`` action from the route-map will have
+   allowas-in applied. The route-map performs matching only; it does not modify
+   route attributes.
+
+   The parameter ``(1-10)`` configures the amount of accepted occurrences of the
+   system AS number in AS path for matching routes (default: 3).
+
+   The parameter ``origin`` configures BGP to only accept routes originated with
+   the same AS number as the system, for matching routes.
+
+   Example configuration to allow AS-path loops for routes with a specific SoO community:
+
+   .. code-block:: frr
+
+      ip extcommunity-list standard MGMT_SOO permit soo 1.1.1.1:0
+      !
+      route-map RM_ALLOW_AS permit 10
+       match extcommunity MGMT_SOO
+      !
+      router bgp 65201
+       neighbor 10.0.0.1 remote-as external
+       !
+       address-family ipv4 unicast
+        neighbor 10.0.0.1 allowas-in route-map RM_ALLOW_AS 1
+       exit-address-family
+
+   Behavior:
+
+   - Routes matching the route-map (permit): allowas-in is applied
+   - Routes NOT matching the route-map (deny): strict AS-path loop detection
+   - If route-map is not found: strict AS-path loop detection
 
    This command is only allowed for eBGP peers.
 
@@ -3072,6 +3236,11 @@ BGP Extended Communities in Route Map
    If the receiving BGP router supports Node Target Extended Communities,
    it will install the route with the community that contains it's own
    local BGP Identifier. Otherwise, it's not installed.
+
+.. clicmd:: set extcommunity evpn rmac X:X:X:X:X:X
+
+   This command sets the EVPN Router MAC extended community value in BGP
+   updates. This command is applied only to EVPN type-5 (IP Prefix) routes.
 
 .. clicmd:: set extcommunity soo EXTCOMMUNITY
 
@@ -5056,7 +5225,7 @@ incoming/outgoing directions.
 
    If the ``json`` option is specified, output is displayed in JSON format.
 
-.. clicmd:: show [ip] bgp [afi] [safi] [all] neighbors A.B.C.D [advertised-routes|received-routes|filtered-routes] [<A.B.C.D/M|X:X::X:X/M> | detail] [json|wide]
+.. clicmd:: show [ip] bgp [afi] [safi] [all] neighbors A.B.C.D [advertised-routes|received-routes|filtered-routes] [<A.B.C.D/M|X:X::X:X/M> | detail] [json [brief] | wide]
 
    Display the routes advertised to a BGP neighbor or received routes
    from neighbor or filtered routes received from neighbor based on the
@@ -5071,7 +5240,7 @@ incoming/outgoing directions.
    If ``all`` option is specified, ``ip`` keyword is ignored and,
    routes displayed for all AFIs and SAFIs.
    if afi is specified, with ``all`` option, routes will be displayed for
-   each SAFI in the selcted AFI
+   each SAFI in the selected AFI
 
    If a specific prefix is specified, the detailed version of that prefix will
    be displayed.
@@ -5082,6 +5251,26 @@ incoming/outgoing directions.
    prefixes.
 
    If ``json`` option is specified, output is displayed in JSON format.
+   ``brief`` is only valid immediately after ``json`` (e.g.
+   ``... advertised-routes json brief``); it selects compact per-prefix JSON
+   without per-path detail, like other ``show bgp`` ``json brief`` forms.
+
+.. clicmd:: show [ip] bgp [<view|vrf> VIEWVRFNAME] [<ipv4|ipv6> [unicast|...]] neighbors <A.B.C.D|X:X::X:X|WORD> <flap-statistics|dampened-routes|routes> [json [brief]]
+
+   Display routes learned from a BGP neighbor, flap statistics for that
+   neighbor, or dampened routes received from that neighbor, for the given
+   address family.
+
+   The ``routes`` keyword shows routes in the BGP table that were received
+   from this peer and accepted by inbound policy. The ``flap-statistics``
+   keyword shows flap statistics for routes learned from this neighbor. The
+   ``dampened-routes`` keyword shows dampened paths received from this
+   neighbor.
+
+   If ``json`` is specified, output is in JSON format. The ``brief``
+   keyword may only be used with ``json``; it produces a brief JSON view
+   (prefix-level path and multipath counts and flags, without per-path
+   details) for unicast neighbor routes.
 
 .. clicmd:: show [ip] bgp [afi] [safi] [all] detail-routes [internal]
 
@@ -5249,7 +5438,7 @@ attribute.
    If ``all`` option is specified, ``ip`` keyword is ignored and,
    routes displayed for all AFIs and SAFIs.
    if afi is specified, with ``all`` option, routes will be displayed for
-   each SAFI in the selcted AFI
+   each SAFI in the selected AFI
 
    If ``json`` option is specified, output is displayed in JSON format.
 
@@ -5364,6 +5553,44 @@ Displaying Routes by Route Distinguisher
    For EVPN Type 2 (macip) routes, a MAC address (and optionally an IP address)
    can be supplied to the command to only display matching prefixes in the
    specified RD.
+
+.. clicmd:: show bgp l2vpn evpn route rd <all|RD> prefix <A.B.C.D/M|X:X::X:X/M> [json]
+
+.. clicmd:: show bgp evpn route rd <all|RD> prefix <A.B.C.D/M|X:X::X:X/M> [json]
+
+   For EVPN Type 5 (prefix) routes, an IPv4 or IPv6 prefix can be supplied to
+   only display matching prefixes in the specified RD, or across all RDs with
+   ``all``.
+
+   Example output:
+
+   .. code-block:: frr
+
+      bordertor-11# show bgp l2vpn evpn route rd all prefix 2001:db8:1:1::/64
+      Route Distinguisher: 192.0.2.2:8
+      BGP routing table entry for 192.0.2.2:8:[5]:[0]:[64]:[2001:db8:1:1::]
+      Paths: (1 available, best #1)
+        Advertised to peers:
+        leaf-11(swp1) leaf-12(swp2)
+        Route [5]:[0]:[64]:[2001:db8:1:1::] VNI 104001
+        655000
+          192.0.2.1 (bordertor-11) from 0.0.0.0 (192.0.2.1)
+            Origin incomplete, metric 0, valid, sourced, local, bestpath-from-AS 655000, best (First path received)
+            Extended Community: ET:8 RT:60176:104001 Rmac:00:01:00:00:01:08
+            Last update: Thu Apr 30 17:46:31 2026
+      Route Distinguisher: 192.0.2.6:9
+      BGP routing table entry for 192.0.2.6:9:[5]:[0]:[64]:[2001:db8:1:1::]
+      Paths: (1 available, best #1)
+        Advertised to peers:
+        leaf-11(swp1) leaf-12(swp2)
+        Route [5]:[0]:[64]:[2001:db8:1:1::] VNI 104002
+        655000
+          192.0.2.1 (bordertor-11) from 0.0.0.0 (192.0.2.1)
+            Origin incomplete, metric 0, valid, sourced, local, bestpath-from-AS 655000, best (First path received)
+            Extended Community: ET:8 RT:60176:104002 Rmac:00:01:00:00:01:08
+            Last update: Thu Apr 30 17:46:31 2026
+
+      Displayed 2 prefixes (2 paths)
 
 Displaying Update Group Information
 -----------------------------------

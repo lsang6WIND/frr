@@ -37,7 +37,7 @@ from lib.topolog import logger
 
 # Required to instantiate the topology builder class.
 
-pytestmark = [pytest.mark.bgpd, pytest.mark.ospfd]
+pytestmark = [pytest.mark.bgpd, pytest.mark.evpn, pytest.mark.ospfd]
 
 
 def build_topo(tgen):
@@ -631,6 +631,59 @@ def test_evpn_l3vni_vlan_bridge():
 
         assertmsg = "L3 VNI 999 (PE2): text output should contain 'Type: L3'"
         assert "Type: L3" in output, assertmsg
+
+
+def show_interface_vxlan101_json(pe, expected):
+    output_json = pe.vtysh_cmd("show interface vxlan101 json", isjson=True)
+    return topotest.json_cmp(output_json, expected)
+
+
+def test_tvd_vxlan_interface_json():
+    "Verify TVD vxlan101 JSON output on PE1 contains vxlanId with single VNI entry"
+
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    pe1 = tgen.gears["PE1"]
+    json_file = "{}/{}/show_intf_vxlan101.json".format(CWD, pe1.name)
+    expected = json.loads(open(json_file).read())
+
+    test_func = partial(show_interface_vxlan101_json, pe1, expected)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+
+    output_json = pe1.vtysh_cmd("show interface vxlan101 json", isjson=True)
+    logger.info(
+        "PE1 show interface vxlan101 json:\n%s", json.dumps(output_json, indent=2)
+    )
+
+    assertmsg = '"{}" show interface vxlan101 json output mismatch'.format(pe1.name)
+    assert result is None, assertmsg
+
+
+def test_tvd_vxlan_interface_vty():
+    "Verify TVD vxlan101 VTY output on PE1 shows VTEP IP and VNI info"
+
+    tgen = get_topogen()
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    pe1 = tgen.gears["PE1"]
+    output = pe1.vtysh_cmd("show interface vxlan101")
+    logger.info("PE1 show interface vxlan101:\n%s", output)
+
+    expected_strings = [
+        "VTEP IP: 10.10.10.10",
+        "VxLAN Id 101",
+        "Master interface: br101",
+    ]
+
+    for s in expected_strings:
+        assert (
+            s in output
+        ), '"{}" show interface vxlan101 missing "{}"\nFull output:\n{}'.format(
+            pe1.name, s, output
+        )
 
 
 def test_imet():

@@ -21,6 +21,9 @@ const struct frr_yang_module_info frr_pim_info = {
 			.cbs = {
 				.create = routing_control_plane_protocols_control_plane_protocol_pim_address_family_create,
 				.destroy = routing_control_plane_protocols_control_plane_protocol_pim_address_family_destroy,
+#if PIM_IPV == 4
+				.apply_finish = routing_control_plane_protocols_control_plane_protocol_pim_address_family_apply_finish,
+#endif
 			}
 		},
 		{
@@ -380,7 +383,6 @@ const struct frr_yang_module_info frr_pim_info = {
 			.xpath = "/frr-interface:lib/interface/frr-pim:pim/address-family/override-interval",
 			.cbs = {
 				.modify = lib_interface_pim_override_interval_modify,
-				.destroy = lib_interface_pim_override_interval_destroy,
 			}
 		},
 		{
@@ -472,7 +474,7 @@ const struct frr_yang_module_info frr_pim_info = {
 			.xpath = "/frr-interface:lib/interface/frr-pim:pim/address-family/mroute",
 			.cbs = {
 				.create = lib_interface_pim_address_family_mroute_create,
-				.destroy = lib_interface_pim_address_family_mroute_oif_destroy,
+				.destroy = lib_interface_pim_address_family_mroute_destroy,
 			}
 		},
 		{
@@ -524,6 +526,13 @@ const struct frr_yang_module_info frr_pim_route_map_info = {
 			.xpath = "/frr-route-map:lib/route-map/entry/match-condition/rmap-match-condition/frr-pim-route-map:multicast-interface",
 			.cbs = {
 				.modify = pim_route_map_match_interface_modify,
+				.destroy = lib_route_map_entry_match_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-route-map:lib/route-map/entry/match-condition/rmap-match-condition/frr-pim-route-map:multicast-source-interface",
+			.cbs = {
+				.modify = pim_route_map_match_source_interface_modify,
 				.destroy = lib_route_map_entry_match_destroy,
 			}
 		},
@@ -585,6 +594,14 @@ const struct frr_yang_module_info frr_pim_rp_info = {
 				.modify = pim_embedded_rp_maximum_rps_modify,
 			}
 		},
+#if PIM_IPV == 4
+		{
+			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-pim:pim/address-family/frr-pim-rp:rp/auto-rp",
+			.cbs = {
+				.apply_finish = routing_control_plane_protocols_control_plane_protocol_pim_address_family_rp_auto_rp_apply_finish,
+			}
+		},
+#endif
 		{
 			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-pim:pim/address-family/frr-pim-rp:rp/auto-rp/discovery-enabled",
 			.cbs = {
@@ -883,6 +900,13 @@ const struct frr_yang_module_info frr_gmp_info = {
 			.xpath = "/frr-interface:lib/interface/frr-gmp:gmp/address-family/proxy",
 			.cbs = {
 				.modify = lib_interface_gmp_address_family_proxy_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-gmp:gmp/address-family/proxy-route-map",
+			.cbs = {
+				.modify  = lib_interface_gm_proxy_rmap_modify,
+				.destroy = lib_interface_gm_proxy_rmap_destroy,
 			}
 		},
 		{

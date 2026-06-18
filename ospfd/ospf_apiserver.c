@@ -20,8 +20,8 @@
 #include "log.h"
 #include "frrevent.h"
 #include "hash.h"
-#include "sockunion.h" /* for inet_aton() */
 #include "buffer.h"
+#include "lib/sockopt.h"
 
 #include <sys/types.h>
 
@@ -238,9 +238,9 @@ static struct ospf_apiserver *lookup_apiserver_by_lsa(struct ospf_lsa *lsa)
 struct ospf_apiserver *ospf_apiserver_new(int fd_sync, int fd_async)
 {
 	struct ospf_apiserver *new =
-		XMALLOC(MTYPE_APISERVER, sizeof(struct ospf_apiserver));
+		XCALLOC(MTYPE_APISERVER, sizeof(struct ospf_apiserver));
 
-	new->filter = XMALLOC(MTYPE_APISERVER_MSGFILTER,
+	new->filter = XCALLOC(MTYPE_APISERVER_MSGFILTER,
 			      sizeof(struct lsa_filter_type));
 
 	new->fd_sync = fd_sync;
@@ -252,21 +252,12 @@ struct ospf_apiserver *ospf_apiserver_new(int fd_sync, int fd_async)
 	/* Initialize temporary storage for LSA instances to be refreshed. */
 	if (IS_DEBUG_OSPF_CLIENT_API)
 		zlog_debug("API: Initiallize the reserve LSDB");
-	memset(&new->reserve, 0, sizeof(struct ospf_lsdb));
 	ospf_lsdb_init(&new->reserve);
 
 	new->out_sync_fifo = msg_fifo_new();
 	new->out_async_fifo = msg_fifo_new();
-	new->t_sync_read = NULL;
-#ifdef USE_ASYNC_READ
-	new->t_async_read = NULL;
-#endif /* USE_ASYNC_READ */
-	new->t_sync_write = NULL;
-	new->t_async_write = NULL;
 
-	new->filter->typemask = 0; /* filter all LSAs */
 	new->filter->origin = ANY_ORIGIN;
-	new->filter->num_areas = 0;
 
 	return new;
 }
@@ -285,7 +276,6 @@ void ospf_apiserver_event(enum ospf_apiserver_event event, int fd,
 		break;
 #ifdef USE_ASYNC_READ
 	case OSPF_APISERVER_ASYNC_READ:
-		apiserv->t_async_read = NULL;
 		event_add_read(master, ospf_apiserver_read, apiserv, fd,
 			       &apiserv->t_async_read);
 		break;
@@ -372,7 +362,6 @@ void ospf_apiserver_read(struct event *e)
 
 	if (fd == apiserv->fd_sync) {
 		event = OSPF_APISERVER_SYNC_READ;
-		apiserv->t_sync_read = NULL;
 
 		if (IS_DEBUG_OSPF_CLIENT_API)
 			zlog_debug("API: %s: Peer: %pI4/%u", __func__,
@@ -382,7 +371,6 @@ void ospf_apiserver_read(struct event *e)
 #ifdef USE_ASYNC_READ
 	else if (fd == apiserv->fd_async) {
 		event = OSPF_APISERVER_ASYNC_READ;
-		apiserv->t_async_read = NULL;
 
 		if (IS_DEBUG_OSPF_CLIENT_API)
 			zlog_debug("API: %s: Peer: %pI4/%u", __func__,
@@ -429,8 +417,6 @@ void ospf_apiserver_sync_write(struct event *event)
 	apiserv = EVENT_ARG(event);
 	assert(apiserv);
 	fd = EVENT_FD(event);
-
-	apiserv->t_sync_write = NULL;
 
 	/* Sanity check */
 	if (fd != apiserv->fd_sync) {
@@ -489,8 +475,6 @@ void ospf_apiserver_async_write(struct event *event)
 	apiserv = EVENT_ARG(event);
 	assert(apiserv);
 	fd = EVENT_FD(event);
-
-	apiserv->t_async_write = NULL;
 
 	/* Sanity check */
 	if (fd != apiserv->fd_async) {
@@ -1556,10 +1540,7 @@ struct ospf_lsa *ospf_apiserver_opaque_lsa_new(struct ospf_area *area,
 	}
 
 	/* Create a stream for internal opaque LSA */
-	if ((s = stream_new(OSPF_MAX_LSA_SIZE)) == NULL) {
-		zlog_warn("%s: stream_new failed", __func__);
-		return NULL;
-	}
+	s = stream_new(OSPF_MAX_LSA_SIZE);
 
 	newlsa = (struct lsa_header *)STREAM_DATA(s);
 
@@ -1665,8 +1646,8 @@ int ospf_apiserver_handle_originate_request(struct ospf_apiserver *apiserv,
 	    offsetof(struct msg_originate_request, data) + ntohs(data->length)) {
 		zlog_warn("%s: message truncated, stream %zu < needed %zu", __func__,
 			  STREAM_READABLE(msg->s),
-			  (size_t)(offsetof(struct msg_originate_request, data) +
-				   (size_t)ntohs(data->length)));
+			  (size_t){ (offsetof(struct msg_originate_request, data) +
+				     (size_t)ntohs(data->length)) });
 		rc = OSPF_API_ERROR;
 		goto out;
 	}
@@ -1841,7 +1822,7 @@ int ospf_apiserver_originate1(struct ospf_lsa *lsa, struct ospf_lsa *old)
 				"LSA[Type%d:%pI4]: OSPF API Server Originate LSA Old Seq: 0x%x Age: %d",
 				old->data->type, &old->data->id,
 				ntohl(old->data->ls_seqnum),
-				ntohl(old->data->ls_age));
+				ntohs(old->data->ls_age));
 		if (IS_LSA_MAX_SEQ(old)) {
 			flog_warn(EC_OSPF_LSA_INSTALL_FAILURE,
 				  "%s: old LSA at maxseq", __func__);
@@ -1854,7 +1835,7 @@ int ospf_apiserver_originate1(struct ospf_lsa *lsa, struct ospf_lsa *old)
 		zlog_debug(
 			"LSA[Type%d:%pI4]: OSPF API Server Originate LSA New Seq: 0x%x Age: %d",
 			lsa->data->type, &lsa->data->id,
-			ntohl(lsa->data->ls_seqnum), ntohl(lsa->data->ls_age));
+			ntohl(lsa->data->ls_seqnum), ntohs(lsa->data->ls_age));
 
 	/* Install this LSA into LSDB. */
 	if (ospf_lsa_install(ospf, lsa->oi, lsa) == NULL) {

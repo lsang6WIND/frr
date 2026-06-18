@@ -329,7 +329,7 @@ static void on_graft_timer(struct event *t)
 		return;
 	}
 
-	if (!up->channel_oil->installed)
+	if (!up->channel_oil || !up->channel_oil->installed)
 		return;
 
 	pim_mroute_update_counters(up->channel_oil);
@@ -359,7 +359,7 @@ static void on_staterefresh_timer(struct event *t)
 		return;
 	}
 
-	if (!up->channel_oil->installed)
+	if (!up->channel_oil || !up->channel_oil->installed)
 		return;
 
 	pim_mroute_update_counters(up->channel_oil);
@@ -391,7 +391,7 @@ static void on_prune_timer(struct event *t)
 		return;
 	}
 
-	if (!up->channel_oil->installed)
+	if (!up->channel_oil || !up->channel_oil->installed)
 		return;
 
 	pim_mroute_update_counters(up->channel_oil);
@@ -522,8 +522,14 @@ bool should_limit_prune(struct pim_upstream *up)
 
 void graft_timer_start(struct pim_upstream *up)
 {
+	if (PIM_DEBUG_PIM_EVENTS) {
+		zlog_debug("%s: starting %d sec timer for upstream (S,G)=%s", __func__,
+			   PIM_DEFAULT_GRAFT_RETRY_PERIOD, up->sg_str);
+	}
+
 	event_cancel(&up->t_graft_timer);
-	event_add_timer(router->master, on_graft_timer, up, router->t_periodic, &up->t_graft_timer);
+	event_add_timer(router->master, on_graft_timer, up, PIM_DEFAULT_GRAFT_RETRY_PERIOD,
+			&up->t_graft_timer);
 	pim_jp_agg_upstream_verification(up, true);
 }
 
@@ -637,7 +643,7 @@ void pim_upstream_join_suppress(struct pim_upstream *up, pim_addr rpf,
 		MIN(pim_if_t_suppressed_msec(up->rpf.source_nexthop.interface),
 		    1000 * holdtime);
 
-	if (up->t_join_timer)
+	if (event_is_scheduled(up->t_join_timer))
 		join_timer_remain_msec =
 			pim_time_timer_remain_msec(up->t_join_timer);
 	else {
@@ -690,7 +696,7 @@ void pim_upstream_join_timer_decrease_to_t_override(const char *debug_label,
 	t_override_msec =
 		pim_if_t_override_msec(up->rpf.source_nexthop.interface);
 
-	if (up->t_join_timer) {
+	if (event_is_scheduled(up->t_join_timer)) {
 		join_timer_remain_msec =
 			pim_time_timer_remain_msec(up->t_join_timer);
 	} else {
@@ -780,17 +786,140 @@ int pim_upstream_could_register(struct pim_upstream *up)
 	return 0;
 }
 
-/* Source registration is suppressed for SSM groups. When the SSM range changes
- * we re-revaluate register setup for existing upstream entries */
+static void pim_upstream_transition_dm_to_sm(struct pim_instance *pim, struct pim_upstream *up)
+{
+	struct interface *ifp = NULL;
+	struct pim_interface *pim_ifp = NULL;
+
+	if (!PIM_UPSTREAM_DM_TEST_INTERFACE(up->flags) || !RP(pim, up->sg.grp))
+		return;
+
+	if (PIM_DEBUG_PIM_EVENTS)
+		zlog_debug("Setting DM mroute %s to sparse", up->sg_str);
+	/* Cancel stale DM timers before transitioning. */
+	if (up->t_prune_timer)
+		event_cancel(&up->t_prune_timer);
+	if (up->t_graft_timer)
+		event_cancel(&up->t_graft_timer);
+	PIM_UPSTREAM_DM_UNSET_PRUNE(up->flags);
+	/* Upstream is both sparse and dense, unset dense flag */
+	PIM_UPSTREAM_DM_UNSET_INTERFACE(up->flags);
+	/* For non-FHR upstreams, default to using the RP tree after
+	 * transitioning from dense to sparse. FHR (S,G) entries manage
+	 * RPT/SPT state via the SPT switch logic and should not have
+	 * USE_RPT forced here.
+	 */
+	if (!PIM_UPSTREAM_FLAG_TEST_FHR(up->flags))
+		PIM_UPSTREAM_FLAG_SET_USE_RPT(up->flags);
+	/* Clear all OIFs without per-OIF kernel flushes; one final MFC
+	 * update is done after the loop. */
+	FOR_ALL_INTERFACES (pim->vrf, ifp) {
+		pim_ifp = ifp->info;
+		if (!pim_ifp || pim_ifp->mroute_vif_index < 0)
+			continue;
+
+		if (up->channel_oil->oif_flags[pim_ifp->mroute_vif_index] & PIM_OIF_FLAG_PROTO_ANY) {
+			bool had_oif = oil_if_has(up->channel_oil, pim_ifp->mroute_vif_index);
+			bool had_mute = !!(up->channel_oil->oif_flags[pim_ifp->mroute_vif_index] &
+					   PIM_OIF_FLAG_MUTE);
+
+			/* Clear proto and mute flags together so oif_flags is
+			 * fully zeroed before any oil_if_set/oil_size update.
+			 */
+			up->channel_oil->oif_flags[pim_ifp->mroute_vif_index] &=
+				~(PIM_OIF_FLAG_PROTO_ANY | PIM_OIF_FLAG_MUTE);
+			if (had_oif) {
+				oil_if_set(up->channel_oil, pim_ifp->mroute_vif_index, 0);
+				if (up->channel_oil->oil_size > 0)
+					--up->channel_oil->oil_size;
+				else if (PIM_DEBUG_PIM_EVENTS)
+					zlog_debug("%s: oil_size underflow for %s vif %d",
+						   __func__, up->sg_str, pim_ifp->mroute_vif_index);
+			} else if (had_mute) {
+				/* MUTE set but TTL already zeroed externally. */
+				if (PIM_DEBUG_PIM_EVENTS)
+					zlog_debug("%s: MUTE set but OIF inactive for %s vif %d",
+						   __func__, up->sg_str, pim_ifp->mroute_vif_index);
+			}
+		}
+
+		/* DM-native OIFs are installed via oil_if_set() directly. */
+		if (oil_if_has(up->channel_oil, pim_ifp->mroute_vif_index)) {
+			oil_if_set(up->channel_oil, pim_ifp->mroute_vif_index, 0);
+			up->channel_oil->oif_flags[pim_ifp->mroute_vif_index] = 0;
+		}
+	}
+	/* Rebuild sparse-mode forwarding; already-JOINED upstreams do not
+	 * re-enter pim_upstream_switch() via update_join_desired() alone.
+	 */
+	{
+		enum pim_upstream_state join_state_before = up->join_state;
+
+		if (up->join_state == PIM_UPSTREAM_JOINED) {
+			struct pim_rpf old_rpf;
+			enum pim_rpf_result rpf_result;
+
+			pim_upstream_inherited_olist_decide(pim, up);
+			pim_upstream_update_join_desired(pim, up);
+			/* update_join_desired() only switches to NOTJOINED when
+			 * DR_JOIN_DESIRED was already set; DM graft JOINED
+			 * upstreams may never have had that flag.
+			 */
+			if (up->join_state == PIM_UPSTREAM_JOINED &&
+			    !pim_upstream_evaluate_join_desired(pim, up))
+				pim_upstream_switch(pim, up, PIM_UPSTREAM_NOTJOINED);
+			else if (up->join_state == PIM_UPSTREAM_JOINED &&
+				 !pim_addr_is_any(up->upstream_addr) &&
+				 !PIM_UPSTREAM_FLAG_TEST_FHR(up->flags)) {
+				/* JOINED upstreams skip pim_upstream_switch(), so refresh RPF
+				 * and re-send the SM join toward the current upstream
+				 * neighbor. Without this, a DM graft cycle leaves the join
+				 * timer aimed at the old RPF until the next NHT update.
+				 * FHR upstreams register instead; that is handled later by
+				 * pim_upstream_register_reevaluate().
+				 */
+				old_rpf.source_nexthop.interface = up->rpf.source_nexthop.interface;
+				old_rpf.rpf_addr = up->rpf.rpf_addr;
+				rpf_result = pim_rpf_update(pim, up, &old_rpf, __func__);
+				if (rpf_result == PIM_RPF_CHANGED ||
+				    (rpf_result == PIM_RPF_FAILURE &&
+				     old_rpf.source_nexthop.interface))
+					pim_zebra_upstream_rpf_changed(pim, up, &old_rpf);
+				if (!pim_upstream_could_register(up)) {
+					pim_upstream_send_join(up);
+					join_timer_start(up);
+				}
+			}
+		} else
+			pim_upstream_update_join_desired(pim, up);
+
+		/* NOTJOINED→JOINED via update_join_desired already installs MFC. */
+		if (!(join_state_before == PIM_UPSTREAM_NOTJOINED &&
+		      up->join_state == PIM_UPSTREAM_JOINED))
+			pim_upstream_mroute_update(up->channel_oil, __func__);
+	}
+}
+
+void pim_upstream_dense_reevaluate(struct pim_instance *pim)
+{
+	struct pim_upstream *up;
+
+	frr_each_safe (rb_pim_upstream, &pim->upstream_head, up)
+		pim_upstream_transition_dm_to_sm(pim, up);
+}
+
+/* Re-evaluate source-registration setup for SSM/ASM changes. */
 void pim_upstream_register_reevaluate(struct pim_instance *pim)
 {
 	struct pim_upstream *up;
 
-	frr_each (rb_pim_upstream, &pim->upstream_head, up) {
+	frr_each_safe (rb_pim_upstream, &pim->upstream_head, up) {
 		/* If FHR is set CouldRegister is True. Also check if the flow
 		 * is actually active; if it is not kat setup will trigger
 		 * source
-		 * registration whenever the flow becomes active. */
+		 * registration whenever the flow becomes active.
+		 */
+
 		if (!PIM_UPSTREAM_FLAG_TEST_FHR(up->flags) ||
 			!pim_upstream_is_kat_running(up))
 			continue;
@@ -1092,12 +1221,6 @@ static struct pim_upstream *pim_upstream_new(struct pim_instance *pim,
 	pim_upstream_find_new_children(pim, up);
 	up->flags = flags;
 	up->ref_count = 1;
-	up->t_join_timer = NULL;
-	up->t_ka_timer = NULL;
-	up->t_rs_timer = NULL;
-	up->t_msdp_reg_timer = NULL;
-	up->t_graft_timer = NULL;
-	up->t_prune_timer = NULL;
 	up->join_state = PIM_UPSTREAM_NOTJOINED;
 	up->reg_state = PIM_REG_NOINFO;
 	up->state_transition = pim_time_monotonic_sec();
@@ -1150,9 +1273,8 @@ static struct pim_upstream *pim_upstream_new(struct pim_instance *pim,
 				up, pim->keep_alive_time);
 		}
 	} else if (!pim_addr_is_any(up->upstream_addr)) {
-		pim_upstream_update_use_rpt(up,
-				false /*update_mroute*/);
 		rpf_result = pim_rpf_update(pim, up, NULL, __func__);
+		pim_upstream_update_use_rpt(up, false /*update_mroute*/);
 		if (rpf_result == PIM_RPF_FAILURE) {
 			up->channel_oil->oil_inherited_rescan = 1;
 			if (PIM_DEBUG_PIM_TRACE)
@@ -2245,7 +2367,6 @@ static bool pim_upstream_kat_start_ok(struct pim_upstream *up)
 	struct channel_oil *c_oil = up->channel_oil;
 	struct interface *ifp = up->rpf.source_nexthop.interface;
 	struct pim_interface *pim_ifp;
-	// struct pim_instance *pim = up->channel_oil->pim;
 
 	/* "iif == RPF_interface(S)" check is not easy to do as the info
 	 * we get from the kernel/ASIC is really a "lookup/key hit".
@@ -2269,7 +2390,10 @@ static bool pim_upstream_kat_start_ok(struct pim_upstream *up)
 	}
 
 	if ((up->join_state == PIM_UPSTREAM_JOINED) && !pim_upstream_empty_inherited_olist(up)) {
-		return true;
+		if (PIM_UPSTREAM_DM_TEST_INTERFACE(up->flags))
+			return true;
+		if (I_am_RP(up->pim, up->sg.grp))
+			return true;
 	}
 
 	return false;
@@ -2304,7 +2428,7 @@ static bool pim_upstream_sg_running_proc(struct pim_upstream *up)
 	bool rv = false;
 	struct pim_instance *pim = up->pim;
 
-	if (!up->channel_oil->installed)
+	if (!up->channel_oil || !up->channel_oil->installed)
 		return rv;
 
 	pim_mroute_update_counters(up->channel_oil);
@@ -2380,7 +2504,7 @@ static void pim_upstream_sg_running(void *arg)
 	struct pim_instance *pim = up->pim;
 
 	// No packet can have arrived here if this is the case
-	if (!up->channel_oil->installed) {
+	if (!up->channel_oil || !up->channel_oil->installed) {
 		if (PIM_DEBUG_TRACE)
 			zlog_debug("%s: %s[%s] is not installed in mroute",
 				   __func__, up->sg_str, pim->vrf->name);

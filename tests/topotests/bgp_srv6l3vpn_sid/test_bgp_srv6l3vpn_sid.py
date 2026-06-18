@@ -25,6 +25,8 @@ import json
 import functools
 import pytest
 
+pytestmark = [pytest.mark.bgpd]
+
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
@@ -435,6 +437,33 @@ def test_sid_per_vrf_manual():
         "r1", "show ip route vrf vrf10 json", "r1/vrf10_pervrf_manual_no_sid_rib.json"
     )
     check_ping("ce1", "192.168.2.2", False, 10, 0.5)
+
+
+def test_sid_move_to_locator3_vrf20():
+    "Moving vrf20 from locator loc2 to locator loc3"
+    get_topogen().gears["r1"].vtysh_cmd(
+        """
+        configure terminal
+         router bgp 1 vrf vrf20
+          segment-routing srv6
+           no locator loc2
+           locator loc3
+        """
+    )
+    check_rib("r1", "show bgp ipv6 vpn 2001:5::/64 json", "r1/vrf20_2001_5.json")
+
+
+def test_sid_move_back_to_locator2_vrf20():
+    "Moving vrf20 from locator loc3 to locator loc2"
+    get_topogen().gears["r1"].vtysh_cmd(
+        """
+        configure terminal
+         router bgp 1 vrf vrf20
+          segment-routing srv6
+           no locator loc3
+           locator loc2
+        """
+    )
 
 
 def test_sid_suppress_locator_vrf20():

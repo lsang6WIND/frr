@@ -69,7 +69,7 @@ uint32_t calc_local_pref(struct attr *attr, struct peer *peer)
 	}
 
 	if (peer && (peer->as != peer->bgp->as)) {
-		if (attr->flag & ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC)) {
+		if (bgp_attr_exists(attr, BGP_ATTR_MULTI_EXIT_DISC)) {
 			if (attr->med > 255) {
 				local_pref = 0;
 			} else {
@@ -79,7 +79,7 @@ uint32_t calc_local_pref(struct attr *attr, struct peer *peer)
 			local_pref = peer->bgp->default_local_pref;
 		}
 	} else {
-		if (attr->flag & ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF)) {
+		if (bgp_attr_exists(attr, BGP_ATTR_LOCAL_PREF)) {
 			local_pref = attr->local_pref;
 		} else {
 			if (peer && peer->bgp) {
@@ -335,7 +335,7 @@ static int process_unicast_route(struct bgp *bgp,		 /* in */
 	 */
 	memset(&hattr, 0, sizeof(hattr));
 	/* hattr becomes a ghost attr */
-	hattr = *attr;
+	bgp_attr_dup_into(&hattr, attr);
 
 	if (rmap) {
 		struct bgp_path_info pinfo = {};
@@ -602,7 +602,7 @@ static void vnc_import_bgp_add_route_mode_resolve_nve(
 	}
 
 	local_pref = calc_local_pref(info->attr, info->peer);
-	if (info->attr->flag & ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC))
+	if (bgp_attr_exists(info->attr, BGP_ATTR_MULTI_EXIT_DISC))
 		med = &info->attr->med;
 
 	/*
@@ -764,7 +764,7 @@ static void vnc_import_bgp_add_route_mode_plain(struct bgp *bgp,
 	 */
 	memset(&hattr, 0, sizeof(hattr));
 	/* hattr becomes a ghost attr */
-	hattr = *attr;
+	bgp_attr_dup_into(&hattr, attr);
 
 	if (rmap) {
 		struct bgp_path_info pinfo = {};
@@ -812,7 +812,7 @@ static void vnc_import_bgp_add_route_mode_plain(struct bgp *bgp,
 
 	local_pref = calc_local_pref(iattr, peer);
 
-	if (iattr && (iattr->flag & ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC))) {
+	if (iattr && bgp_attr_exists(iattr, BGP_ATTR_MULTI_EXIT_DISC)) {
 		med = &iattr->med;
 	}
 
@@ -958,7 +958,7 @@ static void vnc_import_bgp_add_route_mode_nvegroup(
 	 */
 	memset(&hattr, 0, sizeof(hattr));
 	/* hattr becomes a ghost attr */
-	hattr = *attr;
+	bgp_attr_dup_into(&hattr, attr);
 
 	if (rmap) {
 		struct bgp_path_info path;
@@ -1430,8 +1430,7 @@ void vnc_import_bgp_add_vnc_host_route_mode_resolve_nve(
 		}
 		local_pref = calc_local_pref(pb->ubpi->attr, pb->ubpi->peer);
 
-		if (pb->ubpi->attr->flag
-		    & ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC))
+		if (bgp_attr_exists(pb->ubpi->attr, BGP_ATTR_MULTI_EXIT_DISC))
 			med = &pb->ubpi->attr->med;
 
 		/*
@@ -1711,13 +1710,11 @@ static void vnc_import_bgp_exterior_add_route_it(
 
 				/* use local_pref from unicast route */
 				memset(&new_attr, 0, sizeof(new_attr));
-				new_attr = *bpi_interior->attr;
-				if (info->attr->flag
-				    & ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF)) {
+				bgp_attr_dup_into(&new_attr, bpi_interior->attr);
+				if (bgp_attr_exists(info->attr, BGP_ATTR_LOCAL_PREF)) {
 					new_attr.local_pref =
 						info->attr->local_pref;
-					new_attr.flag |= ATTR_FLAG_BIT(
-						BGP_ATTR_LOCAL_PREF);
+					bgp_attr_set(&new_attr, BGP_ATTR_LOCAL_PREF);
 				}
 
 				rfapiBgpInfoFilteredImportVPN(
@@ -2036,14 +2033,12 @@ void vnc_import_bgp_exterior_add_route_interior(
 
 			/* use local_pref from unicast route */
 			memset(&new_attr, 0, sizeof(struct attr));
-			new_attr = *bpi_interior->attr;
-			if (bpi_exterior
-			    && (bpi_exterior->attr->flag
-				& ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF))) {
+			bgp_attr_dup_into(&new_attr, bpi_interior->attr);
+			if (bpi_exterior &&
+			    bgp_attr_exists(bpi_exterior->attr, BGP_ATTR_LOCAL_PREF)) {
 				new_attr.local_pref =
 					bpi_exterior->attr->local_pref;
-				new_attr.flag |=
-					ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF);
+				bgp_attr_set(&new_attr, BGP_ATTR_LOCAL_PREF);
 			}
 
 			rfapiBgpInfoFilteredImportVPN(
@@ -2181,14 +2176,12 @@ void vnc_import_bgp_exterior_add_route_interior(
 
 				/* use local_pref from unicast route */
 				memset(&new_attr, 0, sizeof(struct attr));
-				new_attr = *bpi_interior->attr;
-				if (bpi_exterior
-				    && (bpi_exterior->attr->flag
-					& ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF))) {
+				bgp_attr_dup_into(&new_attr, bpi_interior->attr);
+				if (bpi_exterior &&
+				    bgp_attr_exists(bpi_exterior->attr, BGP_ATTR_LOCAL_PREF)) {
 					new_attr.local_pref =
 						bpi_exterior->attr->local_pref;
-					new_attr.flag |= ATTR_FLAG_BIT(
-						BGP_ATTR_LOCAL_PREF);
+					bgp_attr_set(&new_attr, BGP_ATTR_LOCAL_PREF);
 				}
 
 				rfapiBgpInfoFilteredImportVPN(
@@ -2303,14 +2296,12 @@ void vnc_import_bgp_exterior_add_route_interior(
 
 			/* use local_pref from unicast route */
 			memset(&new_attr, 0, sizeof(struct attr));
-			new_attr = *bpi_interior->attr;
-			if (bpi_exterior
-			    && (bpi_exterior->attr->flag
-				& ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF))) {
+			bgp_attr_dup_into(&new_attr, bpi_interior->attr);
+			if (bpi_exterior &&
+			    bgp_attr_exists(bpi_exterior->attr, BGP_ATTR_LOCAL_PREF)) {
 				new_attr.local_pref =
 					bpi_exterior->attr->local_pref;
-				new_attr.flag |=
-					ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF);
+				bgp_attr_set(&new_attr, BGP_ATTR_LOCAL_PREF);
 			}
 
 			rfapiBgpInfoFilteredImportVPN(
@@ -2497,14 +2488,12 @@ void vnc_import_bgp_exterior_del_route_interior(
 
 				/* use local_pref from unicast route */
 				memset(&new_attr, 0, sizeof(new_attr));
-				new_attr = *bpi->attr;
-				if (bpi_exterior
-				    && (bpi_exterior->attr->flag
-					& ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF))) {
+				bgp_attr_dup_into(&new_attr, bpi->attr);
+				if (bpi_exterior &&
+				    bgp_attr_exists(bpi_exterior->attr, BGP_ATTR_LOCAL_PREF)) {
 					new_attr.local_pref =
 						bpi_exterior->attr->local_pref;
-					new_attr.flag |= ATTR_FLAG_BIT(
-						BGP_ATTR_LOCAL_PREF);
+					bgp_attr_set(&new_attr, BGP_ATTR_LOCAL_PREF);
 				}
 
 				rfapiBgpInfoFilteredImportVPN(

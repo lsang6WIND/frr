@@ -263,6 +263,11 @@ struct bgp_path_info_extra {
 
 	/* For vrf leaking*/
 	struct bgp_path_info_extra_vrfleak *vrfleak;
+
+	/* SR-TE Color (set by route-map 'set sr-te color' or derived from
+	 * the Color Extended Community via bgp_path_info_get_srte_color()).
+	 */
+	uint32_t srte_color;
 };
 
 struct bgp_mplsvpn_label_nh {
@@ -352,6 +357,7 @@ struct bgp_path_info {
  * the actual ecmp path.
  */
 #define BGP_PATH_MULTIPATH_NEW (1 << 20)
+#define BGP_PATH_LOCAL_IMPORT_EVPN_RT2_MACIP (1 << 21)
 
 	/* BGP route type.  This can be static, RIP, OSPF, BGP etc.  */
 	uint8_t type;
@@ -464,7 +470,9 @@ struct bgp_aggregate {
 		struct route_map *map;
 	} rmap;
 
-	/* Suppress-count. */
+	/* More-specific active routes contributing to this aggregate,
+	 * excluding aggregate routes (sub_type == BGP_ROUTE_AGGREGATE).
+	 */
 	unsigned long count;
 
 	/* Count of routes of origin type incomplete under this aggregate. */
@@ -534,9 +542,8 @@ struct bgp_aggregate {
 	 (attr)->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV6_GLOBAL ||              \
 	 (attr)->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV6_GLOBAL_AND_LL)
 
-#define BGP_ATTR_NEXTHOP_AFI_IP6(attr)                                         \
-	(!CHECK_FLAG(attr->flag, ATTR_FLAG_BIT(BGP_ATTR_NEXT_HOP)) &&          \
-	 BGP_ATTR_MP_NEXTHOP_LEN_IP6(attr))
+#define BGP_ATTR_NEXTHOP_AFI_IP6(attr)                                                            \
+	(!bgp_attr_exists(attr, BGP_ATTR_NEXT_HOP) && BGP_ATTR_MP_NEXTHOP_LEN_IP6(attr))
 
 #define BGP_PATH_COUNTABLE(BI)                                                 \
 	(!CHECK_FLAG((BI)->flags, BGP_PATH_HISTORY)                            \
@@ -666,6 +673,8 @@ static inline bool is_pi_family_matching(struct bgp_path_info *pi,
 	return false;
 }
 
+extern struct bgp_path_info_extra *bgp_path_info_extra_get(struct bgp_path_info *path);
+
 static inline void prep_for_rmap_apply(struct bgp_path_info *dst_pi,
 				       struct bgp_path_info_extra *dst_pie, struct bgp_dest *dest,
 				       struct bgp_path_info *src_pi, struct peer *peer,
@@ -677,15 +686,36 @@ static inline void prep_for_rmap_apply(struct bgp_path_info *dst_pi,
 	dst_pi->from = from;
 	dst_pi->attr = attr;
 	dst_pi->net = dest;
+	dst_pi->extra = dst_pie;
 	if (src_pi) {
 		dst_pi->flags = src_pi->flags;
 		dst_pi->type = src_pi->type;
 		dst_pi->sub_type = src_pi->sub_type;
-		if (src_pi->extra) {
+		if (src_pi->extra)
 			memcpy(dst_pie, src_pi->extra, sizeof(struct bgp_path_info_extra));
-			dst_pi->extra = dst_pie;
-		}
 	}
+}
+
+static inline void bgp_path_info_extra_propagate(struct bgp_path_info *dst_bpi,
+						 const struct bgp_path_info *src_bpi)
+{
+	uint32_t src_srte_color;
+
+	if (!src_bpi || !dst_bpi)
+		return;
+
+	src_srte_color = src_bpi->extra ? src_bpi->extra->srte_color : 0;
+	if (src_srte_color || (dst_bpi->extra && dst_bpi->extra->srte_color))
+		bgp_path_info_extra_get(dst_bpi)->srte_color = src_srte_color;
+}
+
+static inline bool bgp_path_info_extra_same(const struct bgp_path_info *old_bpi,
+					    const struct bgp_path_info *new_bpi)
+{
+	uint32_t old_srte_color = old_bpi && old_bpi->extra ? old_bpi->extra->srte_color : 0;
+	uint32_t new_srte_color = new_bpi && new_bpi->extra ? new_bpi->extra->srte_color : 0;
+
+	return old_srte_color == new_srte_color;
 }
 
 static inline bool bgp_check_advertise(struct bgp *bgp, struct bgp_dest *dest,
@@ -798,6 +828,7 @@ extern void bgp_soft_reconfig_table_task_cancel(const struct bgp *bgp,
 extern bool bgp_soft_reconfig_in(struct peer *peer, afi_t afi, safi_t safi);
 extern void bgp_clear_route(struct peer *peer, afi_t afi, safi_t safi);
 extern void bgp_clear_route_all(struct peer *peer);
+extern bool bgp_clear_node_queue_drain(struct peer *peer);
 /* Clear routes for a batch of peers */
 void bgp_clear_route_batch(struct bgp_clearing_info *cinfo);
 
@@ -838,12 +869,12 @@ extern int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr, struct bgp_nl
 
 extern bool bgp_maximum_prefix_overflow(struct peer *peer, afi_t afi, safi_t safi, int always);
 
-extern void bgp_redistribute_add(struct bgp *bgp, struct prefix *p,
-				 const union g_addr *nexthop, ifindex_t ifindex,
-				 enum nexthop_types_t nhtype, uint8_t distance,
-				 enum blackhole_type bhtype, uint32_t metric,
-				 uint8_t type, unsigned short instance,
-				 route_tag_t tag);
+extern void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr *nexthop,
+				 ifindex_t ifindex, enum nexthop_types_t nhtype, uint8_t distance,
+				 enum blackhole_type bhtype, uint32_t metric, uint8_t type,
+				 unsigned short instance, route_tag_t tag,
+				 uint32_t seg6local_action,
+				 const struct seg6local_context *seg6local_ctx);
 extern void bgp_redistribute_delete(struct bgp *bgp, struct prefix *p, uint8_t type,
 				    unsigned short instance);
 extern void bgp_redistribute_withdraw(struct bgp *bgp, afi_t afi, int type,
@@ -1039,4 +1070,6 @@ extern int eoiu_marker_process(struct bgp *bgp, struct bgp_dest *dest);
 extern uint32_t bgp_med_value(struct attr *attr, struct bgp *bgp);
 extern int bgp_dest_set_defer_flag(struct bgp_dest *dest, bool delete);
 extern void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, safi_t safi);
+extern uint32_t bgp_path_info_get_srte_color(struct bgp_path_info *bpi);
+extern uint64_t bgp_path_info_get_link_bw(struct bgp_path_info *bpi);
 #endif /* _QUAGGA_BGP_ROUTE_H */

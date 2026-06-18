@@ -17,6 +17,7 @@
 #include "hash.h"
 #include "ferr.h"
 #include "network.h"
+#include "filter.h"
 
 #include "pimd.h"
 #include "pim_instance.h"
@@ -37,8 +38,10 @@
 #include "pim_jp_agg.h"
 #include "pim_igmp_join.h"
 #include "pim_vxlan.h"
+#include "pim_static.h"
 #include "pim_tib.h"
 #include "pim_util.h"
+#include "pim_routemap.h"
 
 #include "pim6_mld.h"
 
@@ -187,6 +190,7 @@ struct pim_interface *pim_if_new(struct interface *ifp, bool gm, bool pim,
 	pim_ifp->pim->mcast_if_count++;
 
 	pim_filter_ref_init(&pim_ifp->gmp_filter);
+	pim_filter_ref_init(&pim_ifp->gm_proxy_filter);
 
 	return pim_ifp;
 }
@@ -227,6 +231,7 @@ void pim_if_delete(struct interface *ifp)
 	pim_igmp_if_fini(pim_ifp);
 
 	pim_filter_ref_fini(&pim_ifp->gmp_filter);
+	pim_filter_ref_fini(&pim_ifp->gm_proxy_filter);
 
 	list_delete(&pim_ifp->pim_neighbor_list);
 	list_delete(&pim_ifp->upstream_switch_list);
@@ -237,9 +242,104 @@ void pim_if_delete(struct interface *ifp)
 
 	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->nbr_plist);
 	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->allow_rp_plist);
+	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->boundary_oil_plist);
+	pim_ifp->boundary_oil_plist_p = NULL;
+	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->boundary_acl);
+	pim_ifp->boundary_acl_p = NULL;
 	XFREE(MTYPE_PIM_INTERFACE, pim_ifp);
 
 	ifp->info = NULL;
+}
+
+void pim_boundary_oil_plist_set(struct pim_interface *pim_ifp, const char *name)
+{
+	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->boundary_oil_plist);
+	pim_ifp->boundary_oil_plist_p = NULL;
+
+	if (!name)
+		return;
+
+	pim_ifp->boundary_oil_plist = XSTRDUP(MTYPE_PIM_PLIST_NAME, name);
+	pim_ifp->boundary_oil_plist_p = prefix_list_lookup(AFI_IP, name);
+}
+
+void pim_boundary_acl_set(struct pim_interface *pim_ifp, const char *name)
+{
+	XFREE(MTYPE_PIM_PLIST_NAME, pim_ifp->boundary_acl);
+	pim_ifp->boundary_acl_p = NULL;
+
+	if (!name)
+		return;
+
+	pim_ifp->boundary_acl = XSTRDUP(MTYPE_PIM_PLIST_NAME, name);
+	pim_ifp->boundary_acl_p = access_list_lookup(AFI_IP, name);
+}
+
+static void pim_boundary_prefix_list_update_intf(struct pim_interface *pim_ifp,
+						 struct prefix_list *plist)
+{
+	if (!pim_ifp->boundary_oil_plist)
+		return;
+
+	if (pim_ifp->boundary_oil_plist_p == plist)
+		pim_ifp->boundary_oil_plist_p = NULL;
+
+	if (plist && !strcmp(pim_ifp->boundary_oil_plist, prefix_list_name(plist)))
+		pim_ifp->boundary_oil_plist_p = prefix_list_lookup(AFI_IP,
+								   pim_ifp->boundary_oil_plist);
+}
+
+static void pim_boundary_access_list_update_intf(struct pim_interface *pim_ifp,
+						 struct access_list *access)
+{
+	if (!pim_ifp->boundary_acl)
+		return;
+
+	if (pim_ifp->boundary_acl_p == access)
+		pim_ifp->boundary_acl_p = NULL;
+
+	if (access && !strcmp(pim_ifp->boundary_acl, access->name))
+		pim_ifp->boundary_acl_p = access_list_lookup(AFI_IP, pim_ifp->boundary_acl);
+}
+
+void pim_boundary_prefix_list_update(struct prefix_list *plist)
+{
+	struct vrf *vrf;
+	struct interface *ifp;
+	struct pim_interface *pim_ifp;
+
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+		if (!vrf->info)
+			continue;
+
+		FOR_ALL_INTERFACES (vrf, ifp) {
+			pim_ifp = ifp->info;
+			if (!pim_ifp)
+				continue;
+
+			pim_boundary_prefix_list_update_intf(pim_ifp, plist);
+		}
+	}
+}
+
+void pim_boundary_access_list_update(struct access_list *access)
+{
+	struct vrf *vrf;
+	struct interface *ifp;
+	struct pim_interface *pim_ifp;
+
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+		if (!vrf->info)
+			continue;
+
+		FOR_ALL_INTERFACES (vrf, ifp) {
+			pim_ifp = ifp->info;
+			if (!pim_ifp)
+				continue;
+
+			pim_boundary_access_list_update_intf(pim_ifp, access);
+		}
+	}
 }
 
 void pim_if_update_could_assert(struct interface *ifp)
@@ -1022,6 +1122,7 @@ int pim_if_add_vif(struct interface *ifp, bool ispimreg, bool is_vxlan_term)
 
 	/* if the device qualifies as pim_vxlan iif/oif update vxlan entries */
 	pim_vxlan_add_vif(ifp);
+	pim_static_reconcile(pim_ifp->pim);
 	return 0;
 }
 
@@ -1595,6 +1696,7 @@ static void pim_if_static_group_del_all(struct interface *ifp)
 void pim_if_gm_proxy_init(struct pim_instance *pim, struct interface *oif)
 {
 	struct interface *ifp;
+	struct pim_interface *oif_pim = oif->info;
 
 	FOR_ALL_INTERFACES (pim->vrf, ifp) {
 		struct pim_interface *pim_ifp = ifp->info;
@@ -1612,6 +1714,18 @@ void pim_if_gm_proxy_init(struct pim_instance *pim, struct interface *oif)
 					  group)) {
 			for (ALL_LIST_ELEMENTS_RO(group->group_source_list,
 						  source_node, src)) {
+				pim_sgaddr sgaddr = { .src = src->source_addr,
+						      .grp = group->group_addr };
+				struct prefix_sg pfx;
+
+				pim_sg_to_prefix(&sgaddr, &pfx);
+				if (!pim_filter_match(&oif_pim->gm_proxy_filter, &pfx, oif, ifp)) {
+					if (PIM_DEBUG_GM_TRACE)
+						zlog_debug("%s: proxy join for SG%pPSG from %s to %s filtered due to route-map",
+							   __func__, &pfx, ifp->name, oif->name);
+					continue;
+				}
+
 				pim_if_gm_join_add(oif, group->group_addr,
 						   src->source_addr,
 						   GM_JOIN_PROXY);

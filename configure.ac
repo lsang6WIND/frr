@@ -7,7 +7,7 @@
 ##
 AC_PREREQ([2.69])
 
-AC_INIT([frr], [10.7.0-dev], [https://github.com/frrouting/frr/issues])
+AC_INIT([frr], [10.8.0-dev], [https://github.com/frrouting/frr/issues])
 PACKAGE_URL="https://frrouting.org/"
 AC_SUBST([PACKAGE_URL])
 PACKAGE_FULLNAME="FRRouting"
@@ -364,6 +364,7 @@ dnl if the user has specified any CFLAGS, override our settings
 if test "$enable_gcov" = "yes"; then
    if test "$orig_cflags" = ""; then
       AC_C_FLAG([--coverage])
+      AC_C_FLAG([-fprofile-update=atomic])
       AC_C_FLAG([-O0])
    fi
 
@@ -537,44 +538,6 @@ if test "$enable_undefined_sanitizer" = "yes"; then
   ])
 fi
 AC_SUBST([SAN_FLAGS])
-
-dnl frr-format.so
-if test "$with_frr_format" != "no" -a "$with_frr_format" != "yes" -a -n "$with_frr_format"; then
-  AC_C_FLAG([-fplugin=${with_frr_format}], [
-    AC_MSG_ERROR([specified frr-format plugin ($with_frr_format) does not work])
-  ],,[
-#ifndef _FRR_ATTRIBUTE_PRINTFRR
-#error plugin not loaded
-#endif
-#if _FRR_ATTRIBUTE_PRINTFRR < 0x10000
-#error plugin too old
-#endif
-  ])
-elif test "$with_frr_format" = "no"; then
-  : #nothing
-else
-  AC_C_FLAG([-fplugin=tools/gcc-plugins/frr-format.so],[
-    AC_C_FLAG([-fplugin=frr-format],[
-      if test "$with_frr_format" = "yes"; then
-        AC_MSG_ERROR([frr-format plugin requested but not found])
-      fi
-    ],,[
-#ifndef _FRR_ATTRIBUTE_PRINTFRR
-#error plugin not loaded
-#endif
-#if _FRR_ATTRIBUTE_PRINTFRR < 0x10000
-#error plugin too old
-#endif
-    ])
-  ],,[
-#ifndef _FRR_ATTRIBUTE_PRINTFRR
-#error plugin not loaded
-#endif
-#if _FRR_ATTRIBUTE_PRINTFRR < 0x10000
-#error plugin too old
-#endif
-  ])
-fi
 
 AC_MSG_CHECKING([whether linker supports __start/stop_section symbols])
 AC_LINK_IFELSE([AC_LANG_PROGRAM([[
@@ -892,8 +855,6 @@ AC_ARG_ENABLE([undefined-sanitizer],
   AS_HELP_STRING([--enable-undefined-sanitizer], [enable UndefinedBehaviorSanitizer support for detecting undefined behavior]))
 AC_ARG_WITH([crypto],
   AS_HELP_STRING([--with-crypto=<internal|openssl>], [choose between different implementations of cryptographic functions(default value is --with-crypto=internal)]))
-AC_ARG_WITH([frr-format],
-  AS_HELP_STRING([--with-frr-format[=<.../frr-format.so>]], [use frr-format GCC plugin]))
 
 AC_ARG_ENABLE([version_build_config],
   AS_HELP_STRING([--disable-version-build-config], [do not include build configs in show version command]))
@@ -1253,12 +1214,14 @@ AS_IF([$needsync], [
   dnl https://marc.info/?l=openbsd-tech&m=147299508409549&w=2
   AC_MSG_CHECKING([for OpenBSD futex() support])
   AC_LINK_IFELSE([AC_LANG_PROGRAM([
+#include <stddef.h>
+#include <stdint.h>
 #include <sys/futex.h>
 int main(void);
 ],
 [
 {
-  return futex(NULL, FUTEX_WAIT, 0, NULL, NULL, 0);
+  return futex(NULL, FUTEX_WAIT, 0, NULL, NULL);
 }
 ])], [
     AC_MSG_RESULT([yes])
@@ -2625,6 +2588,30 @@ if test "$enable_backtrace" != "no" ; then
           AC_DEFINE([HAVE_LIBUNWIND], [1], [libunwind])
           backtrace_ok=true
         ])
+      ], [
+        # OpenBSD. no idea why the header file is under C++, but it is
+        ac_cflags_save="$CFLAGS"
+        CFLAGS="$CFLAGS -I/usr/include/c++/v1"
+        $as_unset ac_cv_header_libunwind_h
+        AC_CHECK_HEADER([libunwind.h], [
+          # and the actual functions are in libexecinfo, but not public...
+	  # except in execinfo_p, but that's a static library...
+	  # but another copy is in libc++abi...
+          # but that one needs -pthread...
+	  ac_libs_save="$LIBS"
+	  ac_ldflags_save="$LDFLAGS"
+	  LDFLAGS="-pthread $LDFLAGS"
+          $as_unset ac_cv_search_unw_getcontext
+          AC_SEARCH_LIBS([unw_getcontext], [execinfo c++abi execinfo_p], [
+            AC_DEFINE([HAVE_LIBUNWIND], [1], [libunwind])
+            UNWIND_CFLAGS="-I/usr/include/c++/v1"
+            UNWIND_LIBS="-pthread ${ac_cv_search_unw_getcontext}"
+            backtrace_ok=true
+          ])
+	  LDFLAGS="$ac_ldflags_save"
+	  LIBS="$ac_libs_save"
+        ])
+        CFLAGS="$ac_cflags_save"
       ])
     ])
     if test "$enable_backtrace" = "libunwind" -a "$backtrace_ok" = "false"; then

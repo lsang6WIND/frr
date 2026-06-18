@@ -589,6 +589,30 @@ static int mgmtd_config_write(struct vty *vty)
 	return 1;
 }
 
+#ifdef HAVE_MGMTD_TESTC
+DEFPY(mgmt_test_config_value, mgmt_test_config_value_cmd,
+      "mgmt test-config-value VALUE",
+      MGMTD_STR
+      "Set test configuration value\n"
+      "Value to set\n")
+{
+	nb_cli_enqueue_change(vty, "/frr-test-config:frr-test-config/test-value", NB_OP_MODIFY,
+			      value);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY(no_mgmt_test_config_value, no_mgmt_test_config_value_cmd,
+      "no mgmt test-config-value",
+      NO_STR
+      MGMTD_STR
+      "Remove test configuration value\n")
+{
+	nb_cli_enqueue_change(vty, "/frr-test-config:frr-test-config/test-value", NB_OP_DESTROY,
+			      NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+#endif
+
 static struct cmd_node mgmtd_node = {
 	.name = "mgmtd",
 	.node = MGMTD_NODE,
@@ -648,6 +672,11 @@ void mgmt_vty_init(void)
 
 	install_element(VIEW_NODE, &debug_mgmt_cmd);
 	install_element(CONFIG_NODE, &debug_mgmt_cmd);
+
+#ifdef HAVE_MGMTD_TESTC
+	install_element(CONFIG_NODE, &mgmt_test_config_value_cmd);
+	install_element(CONFIG_NODE, &no_mgmt_test_config_value_cmd);
+#endif
 
 	/* Enable view */
 	install_element(ENABLE_NODE, &mgmt_performance_measurement_cmd);

@@ -829,7 +829,7 @@ void zebra_evpn_vl_vxl_ref(uint16_t vid, vni_t vni_id,
 void zebra_evpn_vl_vxl_deref(uint16_t vid, vni_t vni_id,
 			     struct zebra_if *vxlan_zif)
 {
-	struct interface *br_if;
+	ifindex_t bridge_ifindex;
 	struct zebra_evpn_access_bd *acc_bd;
 	uint8_t tmp_cnt;
 
@@ -839,11 +839,22 @@ void zebra_evpn_vl_vxl_deref(uint16_t vid, vni_t vni_id,
 	if (!vni_id)
 		return;
 
-	br_if = vxlan_zif->brslave_info.br_if;
-	if (!br_if)
+	/*
+	 * Use the stored bridge_ifindex rather than dereferencing
+	 * brslave_info.br_if. At zebra shutdown, vrf_terminate_single() ->
+	 * if_terminate() walks the per-VRF interface tree by name and frees
+	 * interfaces one by one; if the bridge is freed before the VxLAN
+	 * interface, the back pointer becomes a dangling reference. The
+	 * bridge_ifindex field is never invalidated this way, and
+	 * zebra_evpn_acc_vl_find_index() looks up the access-bd directly by
+	 * (vid, ifindex), avoiding the heap-use-after-free in
+	 * zebra_evpn_acc_vl_find()'s br_if->ifindex deref.
+	 */
+	bridge_ifindex = vxlan_zif->brslave_info.bridge_ifindex;
+	if (bridge_ifindex == IFINDEX_INTERNAL)
 		return;
 
-	acc_bd = zebra_evpn_acc_vl_find(vid, br_if);
+	acc_bd = zebra_evpn_acc_vl_find_index(vid, bridge_ifindex);
 	if (!acc_bd)
 		return;
 	if (acc_bd->vni_refcnt > 1) {
@@ -860,8 +871,8 @@ void zebra_evpn_vl_vxl_deref(uint16_t vid, vni_t vni_id,
 		return;
 
 	if (IS_ZEBRA_DEBUG_EVPN_MH_ES)
-		zlog_debug("access vlan %d bridge %s vni %u deref", acc_bd->vid,
-			   br_if->name, vni_id);
+		zlog_debug("access vlan %d bridge ifindex %u vni %u deref", acc_bd->vid,
+			   bridge_ifindex, vni_id);
 
 	if (acc_bd->zevpn)
 		zebra_evpn_acc_bd_evpn_set(acc_bd, NULL, acc_bd->zevpn);
@@ -1263,6 +1274,35 @@ static void zebra_evpn_nhid_free(uint32_t nh_id, struct zebra_evpn_es *es)
 		hash_release(zmh_info->nhg_table, es);
 		es->nhg_id = 0;
 	}
+
+	bf_release_index(zmh_info->nh_id_bitmap, id);
+}
+
+/* Reserve bitmap index for a stale FDB NH/NHG read from kernel at startup,
+ * preventing bf_assign_index() from reusing it before the sweep cleans up.
+ */
+void zebra_evpn_mh_reserve_stale_nhid(uint32_t nh_id)
+{
+	uint32_t id = (nh_id & EVPN_NH_ID_VAL_MASK);
+
+	if (!id || id >= EVPN_NH_ID_MAX || !zmh_info)
+		return;
+
+	bf_set_bit(zmh_info->nh_id_bitmap, id);
+
+	if (IS_ZEBRA_DEBUG_KERNEL || IS_ZEBRA_DEBUG_EVPN_MH_NH)
+		zlog_debug("Reserved bitmap index %u for stale fdb-nh 0x%x", id, nh_id);
+}
+
+/* Release bitmap index for a stale FDB NH/NHG during NHE cleanup.
+ * Counterpart to zebra_evpn_mh_reserve_stale_nhid().
+ */
+void zebra_evpn_mh_release_stale_nhid(uint32_t nh_id)
+{
+	uint32_t id = (nh_id & EVPN_NH_ID_VAL_MASK);
+
+	if (!id || id >= EVPN_NH_ID_MAX || !zmh_info)
+		return;
 
 	bf_release_index(zmh_info->nh_id_bitmap, id);
 }
@@ -1878,7 +1918,7 @@ static bool zebra_evpn_es_run_df_election(struct zebra_evpn_es *es,
 	 * our Type-4 routes and for the switch to import the peers' Type-4
 	 * routes
 	 */
-	if (es->df_delay_timer) {
+	if (event_is_scheduled(es->df_delay_timer)) {
 		new_non_df = true;
 		return zebra_evpn_es_df_change(es, new_non_df, caller,
 					       "df-delay");
@@ -2441,7 +2481,7 @@ static void zebra_evpn_es_local_info_set(struct zebra_evpn_es *es,
 			false /* es_evi_re_reval */);
 
 	/* Start the DF delay timer on the local ES */
-	if (!es->df_delay_timer)
+	if (!event_is_scheduled(es->df_delay_timer))
 		event_add_timer(zrouter.master, zebra_evpn_es_df_delay_exp_cb,
 				es, ZEBRA_EVPN_MH_DF_DELAY_TIME,
 				&es->df_delay_timer);
@@ -3347,7 +3387,7 @@ static void zebra_evpn_es_show_entry_detail(struct vty *vty,
 				    listcount(es->es_evi_list));
 		json_object_int_add(json, "macCount", listcount(es->mac_list));
 		json_object_int_add(json, "dfPreference", es->df_pref);
-		if (es->df_delay_timer)
+		if (event_is_scheduled(es->df_delay_timer))
 			json_object_string_add(
 				json, "dfDelayTimer",
 				event_timer_to_hhmmss(thread_buf,
@@ -3393,7 +3433,7 @@ static void zebra_evpn_es_show_entry_detail(struct vty *vty,
 			vty_out(vty, " DF status: %s \n",
 				(es->flags & ZEBRA_EVPNES_NON_DF) ? "non-df"
 								  : "df");
-		if (es->df_delay_timer)
+		if (event_is_scheduled(es->df_delay_timer))
 			vty_out(vty, " DF delay: %s\n",
 				event_timer_to_hhmmss(thread_buf,
 						      sizeof(thread_buf),
@@ -3933,7 +3973,7 @@ static void zebra_evpn_mh_startup_delay_exp_cb(struct event *t)
 
 static void zebra_evpn_mh_startup_delay_timer_start(const char *rc)
 {
-	if (zmh_info->startup_delay_timer) {
+	if (event_is_scheduled(zmh_info->startup_delay_timer)) {
 		if (IS_ZEBRA_DEBUG_EVPN_MH_ES)
 			zlog_debug("startup-delay timer cancelled");
 		event_cancel(&zmh_info->startup_delay_timer);
@@ -4062,7 +4102,7 @@ int zebra_evpn_mh_startup_delay_update(struct vty *vty, uint32_t duration,
 	/* if startup_delay_timer is running allow it to be adjusted
 	 * up or down
 	 */
-	if (zmh_info->startup_delay_timer)
+	if (event_is_scheduled(zmh_info->startup_delay_timer))
 		zebra_evpn_mh_startup_delay_timer_start("config");
 
 	return 0;
@@ -4124,9 +4164,9 @@ void zebra_evpn_mh_terminate(void)
 
 	hash_iterate(zmh_info->evpn_vlan_table,
 			zebra_evpn_acc_vl_cleanup_all, NULL);
-	hash_free(zmh_info->evpn_vlan_table);
-	hash_free(zmh_info->nhg_table);
-	hash_free(zmh_info->nh_ip_table);
+	hash_clean_and_free(&zmh_info->evpn_vlan_table, NULL);
+	hash_clean_and_free(&zmh_info->nhg_table, NULL);
+	hash_clean_and_free(&zmh_info->nh_ip_table, NULL);
 	bf_free(zmh_info->nh_id_bitmap);
 	bf_free(zmh_info->sph_id_bitmap);
 

@@ -29,7 +29,8 @@ extern "C" {
 
 #define MGMTD_FE_MAX_NUM_MSG_PROC  500
 #define MGMTD_FE_MAX_NUM_MSG_WRITE 100
-#define MGMTD_FE_MAX_MSG_LEN	   (64 * 1024)
+/* Messages can be any size, this is just the preallocated buffer size */
+#define MGMTD_FE_MAX_MSG_LEN (4 * 1024)
 
 /***************************************************************
  * Data-structures
@@ -71,7 +72,7 @@ struct mgmt_fe_client_cbs {
 				     uint64_t client_id, uintptr_t session_id,
 				     uintptr_t user_session_client, uint64_t req_id, bool success,
 				     enum mgmt_ds_id src_ds_id, enum mgmt_ds_id dst_ds_id,
-				     bool validate_only, bool unlock, char *errmsg_if_any);
+				     bool validate_only, bool unlock, const char *errmsg_if_any);
 
 	/* Called when get-tree result is returned */
 	int (*get_tree_notify)(struct mgmt_fe_client *client, uintptr_t user_data,
@@ -233,6 +234,40 @@ extern int mgmt_fe_send_commit_req(struct mgmt_fe_client *client, uint64_t sessi
 				   uint64_t req_id, enum mgmt_ds_id src_ds_id,
 				   enum mgmt_ds_id dst_ds_id, bool validate_only, bool abort,
 				   bool unlock);
+
+/*
+ * Send NOTIFY-SELECT to MGMTD daemon.
+ *
+ * client
+ *    Client object.
+ *
+ * session_id
+ *    Client session ID.
+ *
+ * req_id
+ *    Client request ID.
+ *
+ * replace
+ *    TRUE to replace existing selectors, FALSE to append selectors.
+ *
+ * mode
+ *    Notification mode: either NOTIFY_MODE_ON_CHANGE or NOTIFY_MODE_PERIODIC.
+ *
+ * mode_data
+ *    Mode-specific data:
+ *      - ON_CHANGE: must be 0.
+ *      - PERIODIC: interval in msec, must be non-zero.
+ *
+ * selectors
+ *    darr array of xpath selectors (must be darr-allocated).
+ *
+ * Returns:
+ *    0 on success, otherwise msg_conn_send_msg() return values.
+ */
+extern int mgmt_fe_send_notify_select_req(struct mgmt_fe_client *client,
+					  uint64_t session_id, uint64_t req_id, bool replace,
+					  uint8_t mode, uint32_t mode_data,
+					  const char **selectors);
 
 /*
  * Send GET-DATA to MGMTD daemon.

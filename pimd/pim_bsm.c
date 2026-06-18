@@ -79,6 +79,11 @@ void pim_bsm_write_config(struct vty *vty, struct interface *ifp)
 
 static void pim_bsm_rpinfo_free(struct bsm_rpinfo *bsrp_info)
 {
+	struct bsm_scope *scope = bsrp_info->bsgrp_node ? bsrp_info->bsgrp_node->scope : NULL;
+
+	if (bsrp_info->in_scope_count && scope && scope->bsrp_rp_count > 0)
+		scope->bsrp_rp_count--;
+
 	event_cancel(&bsrp_info->g2rp_timer);
 	XFREE(MTYPE_PIM_BSRP_INFO, bsrp_info);
 }
@@ -163,6 +168,18 @@ static struct bsgrp_node *pim_bsm_new_bsgrp_node(struct route_table *rt,
 
 	prefix_copy(&bsgrp->group, grp);
 	return bsgrp;
+}
+
+static uint8_t pim_group_mask_maxlen(uint8_t afi)
+{
+	switch (afi) {
+	case PIM_MSG_ADDRESS_FAMILY_IPV4:
+		return IPV4_MAX_BITLEN;
+	case PIM_MSG_ADDRESS_FAMILY_IPV6:
+		return IPV6_MAX_BITLEN;
+	default:
+		return 0;
+	}
 }
 
 /* BS timer for NO_INFO, ACCEPT_ANY & ACCEPT_PREFERRED.
@@ -283,6 +300,12 @@ void pim_bsm_proc_init(struct pim_instance *pim)
 	cand_rp_groups_init(scope->cand_rp_groups);
 
 	scope->unicast_sock = pim_socket_raw(IPPROTO_PIM);
+	if (scope->unicast_sock < 0) {
+		zlog_warn("%s: Could not create BSR unicast socket: %s",
+			  __func__, safe_strerror(errno));
+		return;
+	}
+
 	set_nonblocking(scope->unicast_sock);
 	sockopt_reuseaddr(scope->unicast_sock);
 
@@ -303,8 +326,12 @@ void pim_bsm_proc_free(struct pim_instance *pim)
 	struct bsgrp_node *bsgrp;
 	struct cand_rp_group *crpgrp;
 
+	pim_crp_db_clear(scope);
+
 	event_cancel(&scope->unicast_read);
-	close(scope->unicast_sock);
+	if (scope->unicast_sock >= 0)
+		close(scope->unicast_sock);
+	scope->unicast_sock = -1;
 
 	pim_bs_timer_stop(scope);
 	pim_bsm_frags_free(scope);
@@ -492,8 +519,9 @@ static void pim_instate_pend_list(struct bsgrp_node *bsgrp_node)
 	 * install the rp from head(if exists) of partial list. List is
 	 * is sorted such that head is the elected RP for the group.
 	 */
-	if (!rn || (prefix_same(&rp_all->group, &bsgrp_node->group) &&
-		    pim_rpf_addr_is_inaddr_any(&rp_all->rp))) {
+	if (!rn || !rp_all ||
+	    (prefix_same(&rp_all->group, &bsgrp_node->group) &&
+	     pim_rpf_addr_is_inaddr_any(&rp_all->rp))) {
 		if (PIM_DEBUG_BSM)
 			zlog_debug("%s: Route node doesn't exist", __func__);
 		if (pend)
@@ -523,10 +551,13 @@ static void pim_instate_pend_list(struct bsgrp_node *bsgrp_node)
 		/* This means we searched and got rp node, needs unlock */
 		route_unlock_node(rn);
 
-		if (active && pend) {
-			if (pim_addr_cmp(active->rp_address, pend->rp_address))
-				pim_rp_change(pim, pend->rp_address,
-					      bsgrp_node->group, RP_SRC_BSR);
+		if (pend) {
+			/* Always install the elected RP from the new BSM.
+			 * Skipping pim_rp_change when active and pend carry
+			 * the same address left i_am_rp stale after RP
+			 * failover (#17588).
+			 */
+			pim_rp_change(pim, pend->rp_address, bsgrp_node->group, RP_SRC_BSR);
 		}
 
 		/* Possible when the first BSM has group with 0 rp count */
@@ -765,7 +796,7 @@ void pim_bsm_clear(struct pim_instance *pim)
 		trp_info = pim_rp_find_match_group(pim, &grp);
 
 		/* RP not found for the group grp */
-		if (pim_rpf_addr_is_inaddr_any(&trp_info->rp)) {
+		if (!trp_info || pim_rpf_addr_is_inaddr_any(&trp_info->rp)) {
 			pim_upstream_rpf_clear(pim, up);
 			pim_rp_set_upstream_addr(pim, &up->upstream_addr,
 						 up->sg.src, up->sg.grp);
@@ -813,6 +844,29 @@ static bool pim_bsm_send_intf(uint8_t *buf, int len, struct interface *ifp,
 
 	pim_ifp->pim->bsm_sent++;
 	return true;
+}
+
+/* Send the current fragment and construct the next one. Reuse old packet
+ * buffer; PIM/BSM headers remain, pkt resets to firstgrp_ptr.
+ */
+static void pim_bsm_frag_flush(struct pim_interface *pim_ifp, uint8_t *pak_start, uint8_t **pkt,
+			       uint8_t *firstgrp_ptr, uint32_t *this_pkt_rem, uint32_t pim_mtu,
+			       pim_addr dst_addr, struct interface *ifp, bool no_fwd)
+{
+	uint32_t this_pkt_len;
+
+	if (*pkt <= firstgrp_ptr) {
+		*this_pkt_rem = pim_mtu - (PIM_BSM_HDR_LEN + PIM_MSG_HEADER_LEN);
+		return;
+	}
+
+	this_pkt_len = pim_mtu - *this_pkt_rem;
+	pim_msg_build_header(pim_ifp->primary_address, dst_addr, pak_start, this_pkt_len,
+			     PIM_MSG_TYPE_BOOTSTRAP, no_fwd);
+	pim_bsm_send_intf(pak_start, this_pkt_len, ifp, dst_addr);
+
+	*pkt = firstgrp_ptr;
+	*this_pkt_rem = pim_mtu - (PIM_BSM_HDR_LEN + PIM_MSG_HEADER_LEN);
 }
 
 static bool pim_bsm_frag_send(uint8_t *buf, uint32_t len, struct interface *ifp,
@@ -886,6 +940,20 @@ static bool pim_bsm_frag_send(uint8_t *buf, uint32_t len, struct interface *ifp,
 		 *                     the frag
 		 * this_rp_cnt    ---> how many rp have we parsed
 		 */
+		if (parsed_len + PIM_BSM_GRP_LEN > len) {
+			if (PIM_DEBUG_BSM)
+				zlog_debug("%s: truncated BSM group header", __func__);
+			XFREE(MTYPE_PIM_BSM_PKT_VAR_MEM, pak_start);
+			return false;
+		}
+
+		/* Flush when the current fragment cannot hold another group + one RP */
+		if (this_pkt_rem < PIM_BSM_GRP_LEN + PIM_BSM_RP_LEN) {
+			pim_bsm_frag_flush(pim_ifp, pak_start, &pkt, firstgrp_ptr, &this_pkt_rem,
+					   pim_mtu, dst_addr, ifp, no_fwd);
+			pak_pending = false;
+		}
+
 		grpinfo = (struct bsmmsg_grpinfo *)buf;
 		memcpy(pkt, buf, PIM_BSM_GRP_LEN);
 		curgrp = (struct bsmmsg_grpinfo *)pkt;
@@ -897,6 +965,21 @@ static bool pim_bsm_frag_send(uint8_t *buf, uint32_t len, struct interface *ifp,
 		/* initialize rp count and total_rp_cnt before the rp loop */
 		this_rp_cnt = 0;
 		total_rp_cnt = grpinfo->frag_rp_count;
+
+		/* Bound RP count against remaining source bytes (byte-exact) */
+		if ((uint32_t)total_rp_cnt * PIM_BSM_RP_LEN > (uint32_t)(len - parsed_len)) {
+			if (PIM_DEBUG_BSM)
+				zlog_debug("%s: BSM frag_rp_count exceeds remaining input",
+					   __func__);
+			XFREE(MTYPE_PIM_BSM_PKT_VAR_MEM, pak_start);
+			return false;
+		}
+
+		if (total_rp_cnt == 0) {
+			/* Group with no RPs in this fragment; outer loop only */
+			pak_pending = (pkt > firstgrp_ptr);
+			continue;
+		}
 
 		/* Loop till all RPs for the group parsed */
 		while (this_rp_cnt < total_rp_cnt) {
@@ -915,9 +998,31 @@ static bool pim_bsm_frag_send(uint8_t *buf, uint32_t len, struct interface *ifp,
 			else
 				frag_rp_cnt = rp_fit_cnt;
 
+			/* Unreachable: the outer-loop pre-flush guarantees
+			 * this_pkt_rem >= GRP_LEN + RP_LEN before the group
+			 * header is written, so rp_fit_cnt >= 1 here and
+			 * frag_rp_cnt >= 1 by the loop guard.  Guard anyway
+			 * so a future refactor cannot silently spin forever.
+			 */
+			if (frag_rp_cnt == 0) {
+				if (PIM_DEBUG_BSM)
+					zlog_debug("%s: BUG: frag_rp_cnt zero in RP loop",
+						   __func__);
+				XFREE(MTYPE_PIM_BSM_PKT_VAR_MEM, pak_start);
+				return false;
+			}
+
+			copy_byte_count = frag_rp_cnt * PIM_BSM_RP_LEN;
+			if (parsed_len + copy_byte_count > len) {
+				if (PIM_DEBUG_BSM)
+					zlog_debug("%s: BSM RP data exceeds remaining input",
+						   __func__);
+				XFREE(MTYPE_PIM_BSM_PKT_VAR_MEM, pak_start);
+				return false;
+			}
+
 			/* populate the frag rp count for the current grp */
 			curgrp->frag_rp_count = frag_rp_cnt;
-			copy_byte_count = frag_rp_cnt * PIM_BSM_RP_LEN;
 
 			/* copy all the rp that we are fitting in this
 			 * frag for the grp
@@ -936,25 +1041,25 @@ static bool pim_bsm_frag_send(uint8_t *buf, uint32_t len, struct interface *ifp,
 			    || (this_pkt_rem
 				< (PIM_BSM_GRP_LEN + PIM_BSM_RP_LEN))) {
 				/* No space to fit in more rp, send this pkt */
-				this_pkt_len = pim_mtu - this_pkt_rem;
-				pim_msg_build_header(
-					pim_ifp->primary_address, dst_addr,
-					pak_start, this_pkt_len,
-					PIM_MSG_TYPE_BOOTSTRAP, no_fwd);
-				pim_bsm_send_intf(pak_start, this_pkt_len, ifp,
-						  dst_addr);
-
-				/* Construct next fragment. Reuse old packet */
-				pkt = firstgrp_ptr;
-				this_pkt_rem = pim_mtu - (PIM_BSM_HDR_LEN
-							  + PIM_MSG_HEADER_LEN);
+				pim_bsm_frag_flush(pim_ifp, pak_start, &pkt, firstgrp_ptr,
+						   &this_pkt_rem, pim_mtu, dst_addr, ifp, no_fwd);
 
 				/* If pkt can't accommodate next group + at
 				 * least one rp, we must break out of this inner
 				 * loop and process next RP
 				 */
-				if (total_rp_cnt == this_rp_cnt)
+				if (total_rp_cnt == this_rp_cnt) {
+					pak_pending = false;
 					break;
+				}
+
+				if (this_pkt_rem < PIM_BSM_GRP_LEN + PIM_BSM_RP_LEN) {
+					if (PIM_DEBUG_BSM)
+						zlog_debug("%s: fragment MTU too small for continuation group",
+							   __func__);
+					XFREE(MTYPE_PIM_BSM_PKT_VAR_MEM, pak_start);
+					return false;
+				}
 
 				/* If some more RPs for the same group pending,
 				 * fill grp hdr
@@ -1179,12 +1284,34 @@ static uint32_t hash_calc_on_grp_rp(struct prefix group, pim_addr rp,
 	return hash;
 }
 
+/*
+ * Bound total (G,RP) tuples in scope. During a legitimate BSM refresh for a
+ * group, entries in partial_bsrp_list grow while bsrp_list still holds the
+ * previous epoch; those active entries will be discarded when the refresh
+ * completes (swap). Count them as extra so we do not falsely reject installs
+ * near PIM_BSM_MAX_RP_ENTRIES.
+ */
+static bool pim_bsm_scope_cannot_add_rp(struct bsm_scope *scope, const struct bsgrp_node *grpnode)
+{
+	size_t extra = bsm_rpinfos_count(grpnode->bsrp_list);
+
+	return scope->bsrp_rp_count + 1 > PIM_BSM_MAX_RP_ENTRIES + extra;
+}
+
 static bool pim_install_bsm_grp_rp(struct pim_instance *pim,
 				   struct bsgrp_node *grpnode,
 				   struct bsmmsg_rpinfo *rp)
 {
 	struct bsm_rpinfo *bsm_rpinfo;
 	uint8_t hashMask_len = pim->global_scope.hashMasklen;
+	struct bsm_scope *scope = grpnode->scope;
+
+	if (pim_bsm_scope_cannot_add_rp(scope, grpnode)) {
+		if (PIM_DEBUG_BSM)
+			zlog_debug("%s: dropping BSM RP entry for group %pFX (limit %u reached)",
+				   __func__, &grpnode->group, PIM_BSM_MAX_RP_ENTRIES);
+		return false;
+	}
 
 	/*memory allocation for bsm_rpinfo */
 	bsm_rpinfo = XCALLOC(MTYPE_PIM_BSRP_INFO, sizeof(*bsm_rpinfo));
@@ -1201,6 +1328,8 @@ static bool pim_install_bsm_grp_rp(struct pim_instance *pim,
 	bsm_rpinfo->hash = hash_calc_on_grp_rp(grpnode->group, rp->rpaddr.addr,
 					       hashMask_len);
 	if (bsm_rpinfos_add(grpnode->partial_bsrp_list, bsm_rpinfo) == NULL) {
+		bsm_rpinfo->in_scope_count = true;
+		scope->bsrp_rp_count++;
 		if (PIM_DEBUG_BSM)
 			zlog_debug(
 				"%s, bs_rpinfo node added to the partial bs_rplist.",
@@ -1252,6 +1381,8 @@ bool pim_bsm_parse_install_g2rp(struct bsm_scope *scope, uint8_t *buf,
 	pim_addr grp_addr;
 
 	while (buflen > offset) {
+		uint8_t max_masklen;
+
 		if (offset + (int)sizeof(struct bsmmsg_grpinfo) > buflen) {
 			if (PIM_DEBUG_BSM)
 				zlog_debug(
@@ -1273,11 +1404,13 @@ bool pim_bsm_parse_install_g2rp(struct bsm_scope *scope, uint8_t *buf,
 		offset += sizeof(struct bsmmsg_grpinfo);
 
 		group.family = PIM_AF;
-		if (grpinfo.group.mask > PIM_MAX_BITLEN) {
+		max_masklen = pim_group_mask_maxlen(grpinfo.group.family);
+		if (!max_masklen || grpinfo.group.family != PIM_MSG_ADDRESS_FAMILY ||
+		    grpinfo.group.mask > max_masklen) {
 			if (PIM_DEBUG_BSM)
-				zlog_debug(
-					"%s, prefix length specified: %d is too long",
-					__func__, grpinfo.group.mask);
+				zlog_debug("%s: invalid group AFI/mask (afi=%u mask=%u max=%u)",
+					   __func__, grpinfo.group.family, grpinfo.group.mask,
+					   max_masklen);
 			return false;
 		}
 
@@ -1289,6 +1422,13 @@ bool pim_bsm_parse_install_g2rp(struct bsm_scope *scope, uint8_t *buf,
 
 		if (grpinfo.rp_count == 0) {
 			struct bsm_rpinfo *old_rpinfo;
+
+			if (grpinfo.frag_rp_count != 0) {
+				if (PIM_DEBUG_BSM)
+					zlog_debug("%s: rp_count zero but frag_rp_count %u",
+						   __func__, grpinfo.frag_rp_count);
+				return false;
+			}
 
 			/* BSR explicitly no longer has RPs for this group */
 			if (!bsgrp)
@@ -1309,7 +1449,29 @@ bool pim_bsm_parse_install_g2rp(struct bsm_scope *scope, uint8_t *buf,
 			continue;
 		}
 
+		if (grpinfo.frag_rp_count > grpinfo.rp_count) {
+			if (PIM_DEBUG_BSM)
+				zlog_debug("%s: frag_rp_count %u exceeds rp_count %u", __func__,
+					   grpinfo.frag_rp_count, grpinfo.rp_count);
+			return false;
+		}
+
 		if (!bsgrp) {
+			if (scope->bsrp_rp_count >= PIM_BSM_MAX_RP_ENTRIES) {
+				size_t skip_rp;
+
+				if (PIM_DEBUG_BSM)
+					zlog_debug("%s: cannot create new group node %pFX, RP limit %u reached",
+						   __func__, &group, PIM_BSM_MAX_RP_ENTRIES);
+				skip_rp = sizeof(struct bsmmsg_rpinfo) *
+					  (size_t)grpinfo.frag_rp_count;
+				if (offset > buflen || (size_t)(buflen - offset) < skip_rp)
+					return false;
+				buf += skip_rp;
+				offset += (int)skip_rp;
+				continue;
+			}
+
 			if (PIM_DEBUG_BSM)
 				zlog_debug("%s, Create new  BSM Group node.",
 					   __func__);
@@ -1360,8 +1522,25 @@ bool pim_bsm_parse_install_g2rp(struct bsm_scope *scope, uint8_t *buf,
 			}
 
 			/* Call Install api to update grp-rp mappings */
-			if (pim_install_bsm_grp_rp(scope->pim, bsgrp, &rpinfo))
-				ins_count++;
+			if (!pim_install_bsm_grp_rp(scope->pim, bsgrp, &rpinfo)) {
+				if (pim_bsm_scope_cannot_add_rp(scope, bsgrp)) {
+					size_t skip_rp;
+
+					/*
+					 * Skip RP TLVs not yet consumed for this group
+					 * (frag_rp_cnt is remaining after while's --).
+					 */
+					skip_rp = sizeof(struct bsmmsg_rpinfo) *
+						  (size_t)frag_rp_cnt;
+					if (offset > buflen || (size_t)(buflen - offset) < skip_rp)
+						return false;
+					buf += skip_rp;
+					offset += (int)skip_rp;
+					break;
+				}
+				continue;
+			}
+			ins_count++;
 		}
 
 		bsgrp->pend_rp_cnt -= ins_count;
@@ -1552,6 +1731,14 @@ int pim_bsm_process(struct interface *ifp, pim_sgaddr *sg, uint8_t *buf,
 		if (PIM_DEBUG_BSM)
 			zlog_debug("%s : Empty Pref BSM received", __func__);
 	}
+
+	/*
+	 * Restart BS liveness whenever we accept a preferred BSR's BSM; do not
+	 * tie this to whether payload parsing installs every (G,RP) (capacity
+	 * bounds may drop tuples without invalidating receipt).
+	 */
+	pim_bs_timer_restart(&pim_ifp->pim->global_scope, PIM_BSR_DEFAULT_TIMEOUT);
+
 	/* Parse Update bsm rp table and install/uninstall rp if required */
 	if (!pim_bsm_parse_install_g2rp(
 		    &pim_ifp->pim->global_scope,
@@ -1562,9 +1749,6 @@ int pim_bsm_process(struct interface *ifp, pim_sgaddr *sg, uint8_t *buf,
 		pim->bsm_dropped++;
 		return -1;
 	}
-	/* Restart the bootstrap timer */
-	pim_bs_timer_restart(&pim_ifp->pim->global_scope,
-			     PIM_BSR_DEFAULT_TIMEOUT);
 
 	/* If new BSM received, clear the old bsm database */
 	if (pim_ifp->pim->global_scope.bsm_frag_tag != frag_tag) {

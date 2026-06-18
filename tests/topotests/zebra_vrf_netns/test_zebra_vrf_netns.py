@@ -82,6 +82,33 @@ def setup_module(mod):
     )
     tgen.start_router()
 
+    # Wait for each per-VRF interface to be fully up in zebra (in the correct
+    # VRF, with the configured address) before adding kernel neighbors. Without
+    # this barrier there is a race where the `ip neigh add` below can fire
+    # before zebra has finished registering the interface in its per-NS
+    # interface table, causing the RTM_NEWNEIGH netlink event to be silently
+    # dropped (zebra_neigh_ipaddr_update() bails out if if_lookup_by_index_per_ns
+    # returns NULL).
+    expected_ifaces = {
+        "r1-eth{}".format(i): {
+            "administrativeStatus": "up",
+            "operationalStatus": "up",
+            "vrfName": vrf,
+            "ipAddresses": [{"address": OVERLAP_PREFIX}],
+        }
+        for i, vrf in enumerate(VRF_NAMES)
+    }
+    test_func = partial(
+        topotest.router_json_cmp,
+        r1,
+        "show interface vrf all json",
+        expected_ifaces,
+    )
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "Per-VRF interfaces not ready in zebra: {}".format(
+        result
+    )
+
     # Add neighbor table entries in each VRF (same IP per VRF, different MACs)
     for vrf, neigh in zip(VRF_NAMES, NEIGH_PER_VRF):
         r1.run(

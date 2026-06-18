@@ -104,6 +104,7 @@ enum zebra_dplane_startup_notifications {
 	ZEBRA_DPLANE_INTERFACES_READ,
 	ZEBRA_DPLANE_TUNNELS_READ,
 	ZEBRA_DPLANE_ADDRESSES_READ,
+	ZEBRA_DPLANE_FINISHED_READING,
 };
 /*
  * API between the zebra dataplane system and the main zebra processing
@@ -192,6 +193,7 @@ enum dplane_op_e {
 
 	/* Incoming interface config events */
 	DPLANE_OP_INTF_NETCONFIG,
+	DPLANE_OP_INTF_SPEED_GET,
 
 	/* Interface update */
 	DPLANE_OP_INTF_INSTALL,
@@ -216,6 +218,14 @@ enum dplane_op_e {
 
 	/* Source address for SRv6 encapsulation */
 	DPLANE_OP_SRV6_ENCAP_SRCADDR_SET,
+
+	/* EVPN FDB/neighbor reads */
+	DPLANE_OP_FDB_READ,
+	DPLANE_OP_NEIGH_READ,
+
+	/* Traffic control qdisc read */
+	DPLANE_OP_TC_QDISC_READ,
+	DPLANE_OP_TC_QDISC_NOTIFY,
 };
 
 /* Operational status of Bridge Ports */
@@ -275,6 +285,14 @@ enum dplane_netconf_status_e {
 /* Some special ifindex values that may be part of the dplane netconf api. */
 #define DPLANE_NETCONF_IFINDEX_ALL     -1
 #define DPLANE_NETCONF_IFINDEX_DEFAULT -2
+
+/*
+ * Generic TC qdisc notification enum.
+ */
+enum dplane_tc_qdisc_notify_e {
+	DPLANE_TC_QDISC_NOTIFY_NEW,
+	DPLANE_TC_QDISC_NOTIFY_DEL,
+};
 
 /* Enable system route notifications */
 void dplane_enable_sys_route_notifs(void);
@@ -427,8 +445,8 @@ void dplane_ctx_set_ifp_change_flags(struct zebra_dplane_ctx *ctx, uint64_t chan
 uint64_t dplane_ctx_get_ifp_change_flags(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_ifp_protodown(struct zebra_dplane_ctx *ctx, bool protodown);
 bool dplane_ctx_get_ifp_protodown(const struct zebra_dplane_ctx *ctx);
-void dplane_ctx_set_ifp_startup(struct zebra_dplane_ctx *ctx, bool startup);
-bool dplane_ctx_get_ifp_startup(const struct zebra_dplane_ctx *ctx);
+void dplane_ctx_set_startup(struct zebra_dplane_ctx *ctx, bool startup);
+bool dplane_ctx_get_startup(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_ifp_protodown_set(struct zebra_dplane_ctx *ctx, bool set);
 bool dplane_ctx_get_ifp_protodown_set(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_ifp_rc_bitfield(struct zebra_dplane_ctx *ctx,
@@ -442,6 +460,10 @@ uint8_t dplane_ctx_get_ifp_family(const struct zebra_dplane_ctx *ctx);
 struct zebra_vxlan_vni_array;
 void dplane_ctx_set_ifp_vxlan_vni_array(struct zebra_dplane_ctx *ctx,
 					struct zebra_vxlan_vni_array *vniarray);
+void dplane_ctx_set_ifp_speed_set(struct zebra_dplane_ctx *ctx, bool set);
+bool dplane_ctx_get_ifp_speed_set(const struct zebra_dplane_ctx *ctx);
+void dplane_ctx_set_ifp_speed(struct zebra_dplane_ctx *ctx, uint32_t speed);
+uint32_t dplane_ctx_get_ifp_speed(const struct zebra_dplane_ctx *ctx);
 
 /*
  * These defines mirror the values for bridge values in linux
@@ -592,6 +614,16 @@ uint8_t
 dplane_ctx_tc_filter_get_dsfield_mask(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_classid(const struct zebra_dplane_ctx *ctx);
 
+int dplane_ctx_tc_qdisc_notify_get_kind(const struct zebra_dplane_ctx *ctx);
+ifindex_t dplane_ctx_tc_qdisc_notify_get_ifindex(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_qdisc_notify_get_major_handle(const struct zebra_dplane_ctx *ctx);
+enum dplane_tc_qdisc_notify_e
+dplane_ctx_tc_qdisc_notify_get_type(const struct zebra_dplane_ctx *ctx);
+/*
+ * For the 'startup' indication on the notification ctx, use the
+ * generic dplane_ctx_get_startup() / dplane_ctx_set_startup() pair.
+ */
+
 void dplane_ctx_set_nexthops(struct zebra_dplane_ctx *ctx, struct nexthop *nh);
 void dplane_ctx_set_backup_nhg(struct zebra_dplane_ctx *ctx,
 			       const struct nexthop_group *nhg);
@@ -730,6 +762,8 @@ const char *dplane_ctx_get_intf_label(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_intf_label(struct zebra_dplane_ctx *ctx, const char *label);
 void dplane_ctx_set_intf_txqlen(struct zebra_dplane_ctx *ctx, uint32_t txqlen);
 uint32_t dplane_ctx_get_intf_txqlen(const struct zebra_dplane_ctx *ctx);
+void dplane_ctx_set_intf_carrier_changes(struct zebra_dplane_ctx *ctx, uint32_t cchanges);
+uint32_t dplane_ctx_get_intf_carrier_changes(const struct zebra_dplane_ctx *ctx);
 
 /* Accessors for MAC information */
 vlanid_t dplane_ctx_mac_get_vlan(const struct zebra_dplane_ctx *ctx);
@@ -869,6 +903,23 @@ dplane_ctx_gre_get_mtu(const struct zebra_dplane_ctx *ctx);
 const struct zebra_l2info_gre *
 dplane_ctx_gre_get_info(const struct zebra_dplane_ctx *ctx);
 
+/*
+ * Accessors for EVPN FDB read context.
+ */
+ifindex_t dplane_ctx_get_macfdb_read_ifindex(const struct zebra_dplane_ctx *ctx);
+ifindex_t dplane_ctx_get_macfdb_read_br_ifindex(const struct zebra_dplane_ctx *ctx);
+vlanid_t dplane_ctx_get_macfdb_read_vid(const struct zebra_dplane_ctx *ctx);
+vni_t dplane_ctx_get_macfdb_read_vni(const struct zebra_dplane_ctx *ctx);
+const struct ethaddr *dplane_ctx_get_macfdb_read_mac(const struct zebra_dplane_ctx *ctx);
+bool dplane_ctx_get_macfdb_read_vlan_aware(const struct zebra_dplane_ctx *ctx);
+bool dplane_ctx_get_macfdb_read_is_vxlan(const struct zebra_dplane_ctx *ctx);
+
+/*
+ * Accessors for EVPN neighbor read context.
+ */
+ifindex_t dplane_ctx_get_neigh_read_ifindex(const struct zebra_dplane_ctx *ctx);
+const struct ipaddr *dplane_ctx_get_neigh_read_ip(const struct zebra_dplane_ctx *ctx);
+
 /* Interface netconf info */
 enum dplane_netconf_status_e
 dplane_ctx_get_netconf_mpls(const struct zebra_dplane_ctx *ctx);
@@ -970,6 +1021,7 @@ enum zebra_dplane_result dplane_intf_addr_unset(const struct interface *ifp,
  */
 enum zebra_dplane_result dplane_intf_add(const struct interface *ifp);
 enum zebra_dplane_result dplane_intf_update(const struct interface *ifp);
+enum zebra_dplane_result dplane_intf_speed_get(const struct interface *ifp);
 
 /*
  * Enqueue tc link changes for the dataplane.
@@ -989,6 +1041,17 @@ enum zebra_dplane_result
 dplane_tc_filter_delete(struct zebra_tc_filter *filter);
 enum zebra_dplane_result
 dplane_tc_filter_update(struct zebra_tc_filter *filter);
+
+/*
+ * Enqueue a kernel TC qdisc notification from the dplane thread to
+ * the zebra master thread for policy processing. The kernel-specific
+ * message type is translated into a generic dplane_tc_qdisc_notify_e
+ * by the dplane decoder before this is called.
+ */
+enum zebra_dplane_result dplane_tc_qdisc_notify_enqueue(ns_id_t ns_id,
+							enum dplane_tc_qdisc_notify_e notify_type,
+							bool startup, int kind, ifindex_t ifindex,
+							uint32_t major_handle);
 
 /*
  * Link layer operations for the dataplane.
@@ -1084,6 +1147,33 @@ dplane_gre_set(struct interface *ifp, struct interface *ifp_link,
 enum zebra_dplane_result
 dplane_srv6_encap_srcaddr_set(const struct in6_addr *addr, ns_id_t ns_id);
 
+/*
+ * Enqueue EVPN FDB read requests for the dataplane.
+ */
+enum zebra_dplane_result dplane_fdb_read(struct zebra_ns *zns);
+enum zebra_dplane_result dplane_neigh_read(struct zebra_ns *zns);
+enum zebra_dplane_result dplane_fdb_read_for_bridge(struct zebra_ns *zns,
+						    const struct interface *ifp,
+						    const struct interface *br_ifp, vlanid_t vid);
+enum zebra_dplane_result dplane_fdb_read_mcast_for_vni(struct zebra_ns *zns,
+						       const struct interface *ifp, vni_t vni);
+enum zebra_dplane_result dplane_fdb_read_specific_mac(struct zebra_ns *zns,
+						      const struct interface *br_ifp,
+						      const struct ethaddr *mac, vlanid_t vid);
+
+/*
+ * Enqueue EVPN neighbor read requests for the dataplane.
+ */
+enum zebra_dplane_result dplane_neigh_read_for_vlan(struct zebra_ns *zns,
+						    const struct interface *vlan_ifp);
+enum zebra_dplane_result dplane_neigh_read_specific_ip(struct zebra_ns *zns,
+						       const struct ipaddr *ip,
+						       const struct interface *vlan_ifp);
+
+/*
+ * Enqueue a traffic control qdisc read request for the dataplane.
+ */
+enum zebra_dplane_result dplane_tc_qdisc_read(struct zebra_ns *zns);
 
 /* Forward ref of zebra_pbr_rule */
 struct zebra_pbr_rule;
@@ -1314,7 +1404,7 @@ void zebra_dplane_pre_finish(void);
 void zebra_dplane_finish(void);
 void zebra_dplane_shutdown(void);
 
-void zebra_dplane_startup_stage(struct zebra_ns *zns,
+void zebra_dplane_startup_stage(ns_id_t ns_id,
 				enum zebra_dplane_startup_notifications spot);
 
 enum zebra_dplane_startup_notifications

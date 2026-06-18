@@ -18,7 +18,7 @@ import pytest
 import json
 from functools import partial
 
-pytestmark = [pytest.mark.pimd]
+pytestmark = [pytest.mark.bgpd, pytest.mark.pimd]
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
@@ -131,13 +131,13 @@ def test_pim_send_mcast_stream():
     # Let's establish a S,G stream from r2 -> r1
     CWD = os.path.dirname(os.path.realpath(__file__))
     r2.run(
-        "{}/mcast-tx.py --ttl 5 --count 40 --interval 2 229.1.1.1 r2-eth0 > {}/r2/mcast_tx_output".format(
+        "{}/mcast-tx.py --ttl 5 --count 1000 --interval 100 229.1.1.1 r2-eth0 > {}/r2/mcast_tx_output".format(
             CWD, tgen.logdir
         )
     )
     # And from r3 -> r1
     r3.run(
-        "{}/mcast-tx.py --ttl 5 --count 40 --interval 2 229.1.1.1 r3-eth0 > {}/r3/mcast_tx_output".format(
+        "{}/mcast-tx.py --ttl 5 --count 1000 --interval 100 229.1.1.1 r3-eth0 > {}/r3/mcast_tx_output".format(
             CWD, tgen.logdir
         )
     )
@@ -348,6 +348,69 @@ def test_pim_static_mroute():
     test_func = partial(topotest.router_json_cmp, r1, "show ip mroute json", expected)
     _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
     assert result is None, "failed to converge final mroute state"
+
+
+def test_pim_static_mroute_deferred():
+    "Static mroutes install once output-interface VIF is ready (#4636)"
+    logger.info("Testing deferred static routes at boot")
+
+    tgen = get_topogen()
+
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1 = tgen.gears["r1"]
+
+    r1.vtysh_cmd(
+        """
+        conf t
+           interface r1-eth1
+              no ip pim
+    """
+    )
+    r1.vtysh_cmd(
+        """
+        conf t
+           interface r1-eth0
+              ip mroute r1-eth1 239.9.9.9 10.0.0.9
+    """
+    )
+
+    expected = {"239.9.9.9": None}
+    test_func = partial(topotest.router_json_cmp, r1, "show ip mroute json", expected)
+    _, result = topotest.run_and_expect(test_func, None, count=10, wait=1)
+    assert result is None, "mroute installed before output VIF was ready"
+
+    r1.vtysh_cmd(
+        """
+        conf t
+           interface r1-eth1
+              ip pim
+    """
+    )
+
+    expected = {"239.9.9.9": {"10.0.0.9": {"oil": {"r1-eth1": "*", "r1-eth2": None}}}}
+    test_func = partial(topotest.router_json_cmp, r1, "show ip mroute json", expected)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "deferred static mroute was not installed"
+
+    output = r1.vtysh_cmd("show running-config")
+    assert "ip mroute r1-eth1 239.9.9.9 10.0.0.9" in output
+
+    r1.vtysh_cmd(
+        """
+        conf t
+           interface r1-eth0
+              no ip mroute r1-eth1 239.9.9.9 10.0.0.9
+    """
+    )
+    expected = {"239.9.9.9": None}
+    test_func = partial(topotest.router_json_cmp, r1, "show ip mroute json", expected)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "failed to remove deferred static mroute"
+
+    output = r1.vtysh_cmd("show running-config")
+    assert "ip mroute r1-eth1 239.9.9.9 10.0.0.9" not in output
 
 
 if __name__ == "__main__":

@@ -1468,7 +1468,8 @@ void pim_show_upstream(struct pim_instance *pim, struct vty *vty,
 		 * If the upstream is not dummy and it has a J/P timer for the
 		 * neighbor display that
 		 */
-		if (!up->t_join_timer && up->rpf.source_nexthop.interface) {
+		if (!event_is_scheduled(up->t_join_timer) &&
+		    up->rpf.source_nexthop.interface) {
 			struct pim_neighbor *nbr;
 
 			nbr = pim_neighbor_find(
@@ -5790,12 +5791,9 @@ int pim_show_bsr_cand_bsr(const struct vrf *vrf, struct vty *vty, bool uj)
 	}
 
 	if (uj) {
-		char buf[INET_ADDRSTRLEN];
-
 		jsondata = json_object_new_object();
-		inet_ntop(AF_INET, &scope->bsr_addrsel.run_addr, buf,
-			  sizeof(buf));
-		json_object_string_add(jsondata, "address", buf);
+		json_object_string_addf(jsondata, "address", "%pPA",
+					&scope->bsr_addrsel.run_addr);
 		json_object_int_add(jsondata, "priority", scope->cand_bsr_prio);
 		json_object_boolean_add(jsondata, "elected",
 					pim->global_scope.state == BSR_ELECTED);

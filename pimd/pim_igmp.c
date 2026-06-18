@@ -344,7 +344,7 @@ static void pim_igmp_other_querier_expire(struct event *t)
 	 * Adjust the querier robustness value to our own configuration if the
 	 * other querier is no longer present.
 	 */
-	if (igmp->t_other_querier_timer == NULL) {
+	if (!event_is_scheduled(igmp->t_other_querier_timer)) {
 		struct pim_interface *pim_ifp = igmp->interface->info;
 
 		igmp->querier_robustness_variable = pim_ifp->gm_default_robustness_variable;
@@ -374,7 +374,7 @@ void pim_igmp_other_querier_timer_on(struct gm_sock *igmp)
 
 	pim_ifp = igmp->interface->info;
 
-	if (igmp->t_other_querier_timer) {
+	if (event_is_scheduled(igmp->t_other_querier_timer)) {
 		/*
 		  There is other querier present already,
 		  then reset the other-querier-present timer.
@@ -433,7 +433,7 @@ void pim_igmp_other_querier_timer_off(struct gm_sock *igmp)
 	assert(igmp);
 
 	if (PIM_DEBUG_GM_TRACE) {
-		if (igmp->t_other_querier_timer) {
+		if (event_is_scheduled(igmp->t_other_querier_timer)) {
 			zlog_debug("IGMP querier %pI4s fd=%d cancelling other-querier-present TIMER event on %s",
 				   &igmp->ifaddr, igmp->fd, igmp->interface->name);
 		}
@@ -568,7 +568,7 @@ static int igmp_recv_query(struct gm_sock *igmp, int query_version, int max_resp
 
 		for (ALL_LIST_ELEMENTS_RO(pim_ifp->gm_group_list, grpnode,
 					  group)) {
-			if (!group->t_group_query_retransmit_timer)
+			if (!event_is_scheduled(group->t_group_query_retransmit_timer))
 				continue;
 
 			if (PIM_DEBUG_GM_TRACE)
@@ -663,6 +663,7 @@ bool pim_igmp_verify_header(struct ip *ip_hdr, size_t len, size_t *hlen)
 	int igmp_msg_len;
 	int msg_type;
 	size_t ip_hlen; /* ip header length in bytes */
+	uint16_t ip_total;
 
 	if (len < sizeof(*ip_hdr)) {
 		zlog_warn("IGMP packet size=%zu shorter than minimum=%zu", len,
@@ -680,8 +681,34 @@ bool pim_igmp_verify_header(struct ip *ip_hdr, size_t len, size_t *hlen)
 		return false;
 	}
 
+	/*
+	 * Reject if the IPv4 total length is larger than what we received
+	 * (e.g. recvmsg truncated a jumbo/reassembled datagram into buf[]).
+	 * Otherwise downstream code must not trust ip_len for sendto() length.
+	 */
+	ip_total = ntohs(ip_hdr->ip_len);
+
+	if (ip_total < sizeof(struct ip)) {
+		zlog_warn("IGMP packet ip_len=%u shorter than minimum IPv4 header", ip_total);
+		return false;
+	}
+	if (ip_total < ip_hlen) {
+		zlog_warn("IGMP packet ip_len=%u shorter than header length %zu", ip_total,
+			  ip_hlen);
+		return false;
+	}
+	if (ip_total > len) {
+		zlog_warn("IGMP packet ip_len=%u exceeds received length %zu (truncated or corrupt)",
+			  ip_total, len);
+		return false;
+	}
+
 	igmp_msg = (char *)ip_hdr + ip_hlen;
-	igmp_msg_len = len - ip_hlen;
+	/*
+	 * Use datagram length from ip_hdr, not recv buffer length (len may
+	 * include link-layer padding past ip_total).
+	 */
+	igmp_msg_len = ip_total - ip_hlen;
 
 	if (igmp_msg_len < PIM_IGMP_MIN_LEN) {
 		zlog_warn("IGMP message size=%d shorter than minimum=%d",
@@ -728,6 +755,7 @@ int pim_igmp_packet(struct gm_sock *igmp, char *buf, size_t len)
 	const struct pim_interface *pim_interface = igmp->interface->info;
 	struct ip *ip_hdr = (struct ip *)buf;
 	size_t ip_hlen; /* ip header length in bytes */
+	uint16_t ip_total;
 	char *igmp_msg;
 	int igmp_msg_len;
 	int msg_type;
@@ -735,6 +763,8 @@ int pim_igmp_packet(struct gm_sock *igmp, char *buf, size_t len)
 
 	if (!pim_igmp_verify_header(ip_hdr, len, &ip_hlen))
 		return -1;
+
+	ip_total = ntohs(ip_hdr->ip_len);
 
 	if (ip_hlen > sizeof(struct ip)) {
 		const uint8_t *ip_options = (const uint8_t *)(ip_hdr + 1);
@@ -755,7 +785,8 @@ int pim_igmp_packet(struct gm_sock *igmp, char *buf, size_t len)
 	}
 
 	igmp_msg = buf + ip_hlen;
-	igmp_msg_len = len - ip_hlen;
+	/* Same as pim_igmp_verify_header(): use ip_total, not recv len (padding). */
+	igmp_msg_len = (int)(ip_total - ip_hlen);
 	msg_type = *igmp_msg;
 
 	if (PIM_DEBUG_GM_PACKETS) {
@@ -877,7 +908,7 @@ void pim_igmp_general_query_off(struct gm_sock *igmp)
 	assert(igmp);
 
 	if (PIM_DEBUG_GM_TRACE) {
-		if (igmp->t_igmp_query_timer) {
+		if (event_is_scheduled(igmp->t_igmp_query_timer)) {
 			zlog_debug("IGMP querier %pI4s fd=%d cancelling query TIMER event on %s",
 				   &igmp->ifaddr, igmp->fd, igmp->interface->name);
 		}
@@ -939,7 +970,7 @@ static void sock_close(struct gm_sock *igmp)
 	pim_igmp_general_query_off(igmp);
 
 	if (PIM_DEBUG_GM_TRACE_DETAIL) {
-		if (igmp->t_igmp_read) {
+		if (event_is_scheduled(igmp->t_igmp_read)) {
 			zlog_debug(
 				"Cancelling READ event on IGMP socket %pI4 fd=%d on interface %s",
 				&igmp->ifaddr, igmp->fd,
@@ -1146,7 +1177,7 @@ void pim_igmp_if_fini(struct pim_interface *pim_ifp)
 	assert(!listcount(pim_ifp->gm_group_list));
 
 	list_delete(&pim_ifp->gm_group_list);
-	hash_free(pim_ifp->gm_group_hash);
+	hash_clean_and_free(&pim_ifp->gm_group_hash, NULL);
 
 	list_delete(&pim_ifp->gm_socket_list);
 }
@@ -1171,9 +1202,6 @@ static struct gm_sock *igmp_sock_new(int fd, struct in_addr ifaddr,
 	igmp->interface = ifp;
 	igmp->ifaddr = ifaddr;
 	igmp->querier_addr = ifaddr;
-	igmp->t_igmp_read = NULL;
-	igmp->t_igmp_query_timer = NULL;
-	igmp->t_other_querier_timer = NULL; /* no other querier present */
 	igmp->querier_robustness_variable =
 		pim_ifp->gm_default_robustness_variable;
 	igmp->sock_creation = pim_time_monotonic_sec();
@@ -1327,7 +1355,7 @@ static void igmp_group_timer(struct event *t)
 
 static void group_timer_off(struct gm_group *group)
 {
-	if (!group->t_group_timer)
+	if (!event_is_scheduled(group->t_group_timer))
 		return;
 
 	if (PIM_DEBUG_GM_TRACE) {
@@ -1348,7 +1376,8 @@ void igmp_group_timer_on(struct gm_group *group, long interval_msec,
 		.grp.ipaddr_v4 = group->group_addr,
 	};
 
-	if (interval_msec && !pim_filter_match(&pim_ifp->gmp_filter, &sg, group->interface)) {
+	if (interval_msec &&
+	    !pim_filter_match(&pim_ifp->gmp_filter, &sg, group->interface, group->interface)) {
 		if (PIM_DEBUG_GM_TRACE)
 			zlog_debug("Timer for %pPSG on %s not refreshed due to route-map reject",
 				   &sg, ifname);
@@ -1437,8 +1466,6 @@ struct gm_group *igmp_add_group_by_addr(struct gm_sock *igmp,
 	group->group_source_list = list_new();
 	group->group_source_list->del = (void (*)(void *))igmp_source_free;
 
-	group->t_group_timer = NULL;
-	group->t_group_query_retransmit_timer = NULL;
 	group->group_specific_query_retransmit_count = 0;
 	group->group_addr = group_addr;
 	group->interface = igmp->interface;

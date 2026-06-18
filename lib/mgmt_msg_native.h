@@ -484,6 +484,10 @@ _Static_assert(sizeof(struct mgmt_msg_rpc_reply) ==
 		       offsetof(struct mgmt_msg_rpc_reply, data),
 	       "Size mismatch");
 
+/* notify-select mode values */
+#define NOTIFY_MODE_ON_CHANGE 0
+#define NOTIFY_MODE_PERIODIC  1
+
 /**
  * struct mgmt_msg_notify_select - Add notification selectors for FE client.
  *
@@ -501,13 +505,18 @@ _Static_assert(sizeof(struct mgmt_msg_rpc_reply) ==
  * @selectors: the xpath prefixes to selectors notifications through.
  * @replace: if true replace existing selectors with `selectors`.
  * @get_only: [backend-only]: if true do get op, don't change selectors.
+ * @mode: on-change or periodic mode.
+ * @mode_data: mode-specific data.
+ *            - NOTIFY_MODE_ON_CHANGE: must be 0.
+ *            - NOTIFY_MODE_PERIODIC: interval in msec, must be non-zero.
  */
 struct mgmt_msg_notify_select {
 	struct mgmt_msg_header;
 	uint8_t replace;
 	uint8_t get_only;
 	uint8_t subscribing;
-	uint8_t resv2[5];
+	uint8_t mode;
+	uint32_t mode_data;
 
 	alignas(8) char selectors[];
 };
@@ -711,6 +720,9 @@ struct mgmt_msg_cfg_apply_req {
  * struct mgmt_msg_cfg_apply_reply - Signal the config has been applied.
  *
  * @refer_id: The transaction ID which was applied.
+ *
+ * Optional variable data after the header contains a NUL-terminated
+ * informational message string from the backend's northbound callbacks.
  */
 struct mgmt_msg_cfg_apply_reply {
 	struct mgmt_msg_header;
@@ -977,13 +989,13 @@ extern int vmgmt_msg_native_send_error(struct msg_conn *conn,
  *	The secondary data or NULL if there was an error decoding (i.e., the
  *	message is corrupt).
  */
-#define mgmt_msg_native_data_decode(msg, msglen)                                                   \
-	({                                                                                         \
-		size_t _m__len = (msglen) - sizeof(*msg);                                          \
-		const char *_m__data = msg->data + msg->vsplit;                                    \
-		if (!msg->vsplit || msg->vsplit > _m__len || _m__data[-1] != 0)                    \
-			_m__data = NULL;                                                           \
-		_m__data;                                                                          \
+#define mgmt_msg_native_data_decode(msg, msglen)                                                  \
+	({                                                                                        \
+		size_t _m__len = (msglen) - sizeof(*msg);                                         \
+		const char *_m__data = msg->data + msg->vsplit;                                   \
+		if (!msg->vsplit || msg->vsplit >= _m__len || _m__data[-1] != 0)                  \
+			_m__data = NULL;                                                          \
+		_m__data;                                                                         \
 	})
 
 /**

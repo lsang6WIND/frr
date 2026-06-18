@@ -66,7 +66,7 @@ static void sock_close(struct interface *ifp)
 	struct pim_interface *pim_ifp = ifp->info;
 
 	if (PIM_DEBUG_PIM_TRACE) {
-		if (pim_ifp->t_pim_sock_read) {
+		if (event_is_scheduled(pim_ifp->t_pim_sock_read)) {
 			zlog_debug(
 				"Cancelling READ event for PIM socket fd=%d on interface %s",
 				pim_ifp->pim_sock_fd, ifp->name);
@@ -75,7 +75,7 @@ static void sock_close(struct interface *ifp)
 	event_cancel(&pim_ifp->t_pim_sock_read);
 
 	if (PIM_DEBUG_PIM_TRACE) {
-		if (pim_ifp->t_pim_hello_timer) {
+		if (event_is_scheduled(pim_ifp->t_pim_hello_timer)) {
 			zlog_debug(
 				"Cancelling PIM hello timer for interface %s",
 				ifp->name);
@@ -223,7 +223,15 @@ int pim_pim_packet(struct interface *ifp, uint8_t *buf, size_t len,
 	case PIM_MSG_TYPE_HELLO:
 	case PIM_MSG_TYPE_JOIN_PRUNE:
 	case PIM_MSG_TYPE_ASSERT:
-		if (pim_ifp == NULL || pim_ifp->nbr_plist == NULL)
+		if (!pim_ifp) {
+			if (PIM_DEBUG_PIM_PACKETS)
+				zlog_debug("%s: reject PIM %s from %pPA on %s: PIM not enabled on interface",
+					   __func__, pim_pim_msgtype2str(header->type), &sg.src,
+					   ifp->name);
+			return -1;
+		}
+
+		if (pim_ifp->nbr_plist == NULL)
 			break;
 
 		nbr_plist = prefix_list_lookup(PIM_AFI, pim_ifp->nbr_plist);
@@ -376,13 +384,13 @@ int pim_pim_packet(struct interface *ifp, uint8_t *buf, size_t len,
 		rv = pim_graft_recv(ifp, neigh, sg.src, pim_msg + PIM_MSG_HEADER_LEN,
 				    pim_msg_len - PIM_MSG_HEADER_LEN, PIM_MSG_TYPE_GRAFT);
 
-		/* dm: send ack */
+		/* dm: send ack (RFC 3973: Graft-Ack is unicast to Graft sender) */
 		pim_ifp = ifp->info;
 		if (!pim_ifp->pim_passive_enable) {
-			pim_msg_build_header(sg.src, qpim_all_pim_routers_addr, pim_msg,
+			pim_msg_build_header(pim_ifp->primary_address, sg.src, pim_msg,
 					     pim_msg_len, PIM_MSG_TYPE_GRAFT_ACK, false);
-			pim_msg_send(pim_ifp->pim_sock_fd, pim_ifp->primary_address,
-				     qpim_all_pim_routers_addr, pim_msg, pim_msg_len, ifp);
+			pim_msg_send(pim_ifp->pim_sock_fd, pim_ifp->primary_address, sg.src,
+				     pim_msg, pim_msg_len, ifp);
 		}
 		return rv;
 		break;
@@ -520,7 +528,7 @@ static void pim_sock_read(struct event *t)
 
 	pim_ifp = ifp->info;
 
-	if (pim_sock_read_helper(fd, pim_ifp->pim, true) == 0)
+	if (pim_sock_read_helper(fd, pim_ifp->pim, true) != 0)
 		++pim_ifp->pim_ifstat_hello_recvfail;
 
 	pim_sock_read_on(ifp);
@@ -609,9 +617,7 @@ void pim_sock_reset(struct interface *ifp)
 
 	pim_ifp->pim_sock_fd = -1;
 	pim_ifp->pim_sock_creation = 0;
-	pim_ifp->t_pim_sock_read = NULL;
 
-	pim_ifp->t_pim_hello_timer = NULL;
 	pim_ifp->pim_hello_period = PIM_DEFAULT_HELLO_PERIOD;
 	pim_ifp->pim_default_holdtime =
 		-1; /* unset: means 3.5 * pim_hello_period */
@@ -776,10 +782,24 @@ int pim_msg_send(int fd, pim_addr src, pim_addr dst, uint8_t *pim_msg,
 	case PIM_MSG_TYPE_BOOTSTRAP:
 	case PIM_MSG_TYPE_ASSERT:
 	case PIM_MSG_TYPE_GRAFT:
-	case PIM_MSG_TYPE_STATE_REFRESH:
-	case PIM_MSG_TYPE_GRAFT_ACK:
 		ttl = 1;
 		break;
+	case PIM_MSG_TYPE_STATE_REFRESH: {
+		struct pim_staterefresh_header *srh;
+
+		/*
+		 * IP TTL normally comes from the SR header body (RFC 3973).
+		 * If the message is truncated, use the default originator TTL.
+		 */
+		if (pim_msg_size < (int)(PIM_MSG_HEADER_LEN + sizeof(*srh))) {
+			ttl = PIM_STATEREFRESH_DEFAULT_TTL;
+			break;
+		}
+		srh = (struct pim_staterefresh_header *)(pim_msg + pim_msg_size - sizeof(*srh));
+		ttl = srh->ttl;
+		break;
+	}
+	case PIM_MSG_TYPE_GRAFT_ACK:
 	case PIM_MSG_TYPE_REGISTER:
 	case PIM_MSG_TYPE_REG_STOP:
 	case PIM_MSG_TYPE_CANDIDATE:
@@ -1022,7 +1042,7 @@ void pim_hello_restart_triggered(struct interface *ifp)
 	// triggered_hello_delay_msec = 1000 *
 	// pim_ifp->pim_triggered_hello_delay;
 
-	if (pim_ifp->t_pim_hello_timer) {
+	if (event_is_scheduled(pim_ifp->t_pim_hello_timer)) {
 		long remain_msec =
 			pim_time_timer_remain_msec(pim_ifp->t_pim_hello_timer);
 		if (remain_msec <= triggered_hello_delay_msec) {
@@ -1073,7 +1093,7 @@ int pim_sock_add(struct interface *ifp)
 
 	pim_socket_ip_hdr(pim_ifp->pim_sock_fd);
 
-	pim_ifp->t_pim_sock_read = NULL;
+	event_cancel(&pim_ifp->t_pim_sock_read);
 	pim_ifp->pim_sock_creation = pim_time_monotonic_sec();
 
 	/*

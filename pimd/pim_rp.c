@@ -334,7 +334,12 @@ void pim_rp_refresh_group_to_rp_mapping(struct pim_instance *pim)
 #if PIM_IPV == 4
 	pim_msdp_i_am_rp_changed(pim);
 #endif /* PIM_IPV == 4 */
+	/* Transition DM->SM upstreams first, then re-evaluate RPT/SPT usage
+	 * and finally re-evaluate source registration state.
+	 */
+	pim_upstream_dense_reevaluate(pim);
 	pim_upstream_reeval_use_rpt(pim);
+	pim_upstream_register_reevaluate(pim);
 }
 
 void pim_rp_prefix_list_update(struct pim_instance *pim,
@@ -838,7 +843,7 @@ int pim_rp_del(struct pim_instance *pim, pim_addr rp_addr, struct prefix group,
 			trp_info = pim_rp_find_match_group(pim, &grp);
 
 			/* RP not found for the group grp */
-			if (pim_rpf_addr_is_inaddr_any(&trp_info->rp)) {
+			if (!trp_info || pim_rpf_addr_is_inaddr_any(&trp_info->rp)) {
 				pim_upstream_rpf_clear(pim, up);
 				pim_rp_set_upstream_addr(
 					pim, &up->upstream_addr, up->sg.src,
@@ -887,11 +892,21 @@ int pim_rp_change(struct pim_instance *pim, pim_addr new_rp_addr,
 
 	old_rp_addr = rp_info->rp.rpf_addr;
 	if (!pim_addr_cmp(new_rp_addr, old_rp_addr)) {
-		if (rp_info->rp_src != rp_src_flag) {
+		int old_i_am_rp = rp_info->i_am_rp;
+
+		if (rp_info->rp_src != rp_src_flag)
 			rp_info->rp_src = rp_src_flag;
-			route_unlock_node(rn);
-			return PIM_SUCCESS;
-		}
+
+		/* RP address unchanged: reconcile i_am_rp and return. NHT
+		 * tracking and rp_list updates below apply only when the
+		 * address changes (g2rp refresh and BSM re-confirm both
+		 * call here with the same address).
+		 */
+		pim_rp_check_interfaces(pim, rp_info);
+		if (old_i_am_rp != rp_info->i_am_rp)
+			pim_rp_refresh_group_to_rp_mapping(pim);
+		route_unlock_node(rn);
+		return PIM_SUCCESS;
 	}
 
 	/* Deregister old RP addr with Zebra NHT */

@@ -1102,6 +1102,7 @@ static int fpm_nl_enqueue(struct fpm_nl_ctx *fnc, struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_INTF_INSTALL:
 	case DPLANE_OP_INTF_UPDATE:
 	case DPLANE_OP_INTF_DELETE:
+	case DPLANE_OP_INTF_SPEED_GET:
 	case DPLANE_OP_TC_QDISC_INSTALL:
 	case DPLANE_OP_TC_QDISC_UNINSTALL:
 	case DPLANE_OP_TC_CLASS_ADD:
@@ -1114,6 +1115,10 @@ static int fpm_nl_enqueue(struct fpm_nl_ctx *fnc, struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_NONE:
 	case DPLANE_OP_STARTUP_STAGE:
 	case DPLANE_OP_VLAN_INSTALL:
+	case DPLANE_OP_FDB_READ:
+	case DPLANE_OP_NEIGH_READ:
+	case DPLANE_OP_TC_QDISC_READ:
+	case DPLANE_OP_TC_QDISC_NOTIFY:
 		break;
 
 	}

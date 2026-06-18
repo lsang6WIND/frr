@@ -312,7 +312,8 @@ static int vty_mgmt_handle_error_reply(struct mgmt_fe_client *client, uintptr_t 
 	const char *cname = mgmt_fe_client_name(client);
 
 	if (!vty->mgmt_req_pending_cmd) {
-		debug_fe_client("Error with no pending command: %d returned for client %s 0x%Lx session-id %Lu req-id %Lu error-str %s",
+		debug_fe_client("Error with no pending command: %d returned for client %s 0x%" PRIx64
+				" session-id %" PRIu64 " req-id %" PRIu64 " error-str %s",
 				error, cname, client_id, session_id, req_id, errstr);
 		vty_out(vty, "%% Error %d from MGMTD for %s with no pending command: %s\n", error,
 			cname, errstr);
@@ -466,7 +467,7 @@ static void vty_mgmt_handle_commit_config_reply(struct mgmt_fe_client *client, u
 						uintptr_t session_ctx, uint64_t req_id,
 						bool success, enum mgmt_ds_id src_ds_id,
 						enum mgmt_ds_id dst_ds_id, bool validate_only,
-						bool unlock, char *errmsg_if_any)
+						bool unlock, const char *errmsg_if_any)
 {
 	struct vty *vty;
 
@@ -482,8 +483,8 @@ static void vty_mgmt_handle_commit_config_reply(struct mgmt_fe_client *client, u
 		debug_fe_client("COMMIT_CONFIG request for client 0x%" PRIx64 " req-id %" PRIu64
 				" was successfull%s%s",
 				client_id, req_id, errmsg_if_any ? ": " : "", errmsg_if_any ?: "");
-		if (!unlock && errmsg_if_any)
-			vty_out(vty, "MGMTD: %s\n", errmsg_if_any);
+		if (errmsg_if_any)
+			vty_out(vty, "%% Configuration applied with notes:\n%s\n", errmsg_if_any);
 	}
 
 	if (unlock) {
@@ -603,11 +604,15 @@ static int vty_mgmt_handle_edit_reply(struct mgmt_fe_client *client, uintptr_t u
 {
 	struct vty *vty = (struct vty *)session_ctx;
 
-	if (!error)
-		debug_fe_client("EDIT request for client 0x%Lx req-id %Lu was successful, xpath: %s",
+	if (!error) {
+		debug_fe_client("EDIT request for client 0x%" PRIx64 " req-id %" PRIu64
+				" was successful, xpath: %s",
 				client_id, req_id, xpath);
-	else {
-		debug_fe_client("EDIT request for client 0x%Lx req-id %Lu failed xpath: %s: %d: %s",
+		if (errstr)
+			vty_out(vty, "%% Configuration applied with notes:\n%s\n", errstr);
+	} else {
+		debug_fe_client("EDIT request for client 0x%" PRIx64 " req-id %" PRIu64
+				" failed xpath: %s: %d: %s",
 				client_id, req_id, xpath, error, errstr);
 		vty_out(vty, "%% %s\n", errstr);
 		vty_out(vty, "%% Failed to edit configuration.\n");

@@ -881,7 +881,7 @@ static void ospf6_neighbor_show(struct vty *vty, struct ospf6_neighbor *on,
 
 	/* Dead time */
 	h = m = s = 0;
-	if (on->inactivity_timer) {
+	if (event_is_scheduled(on->inactivity_timer)) {
 		s = monotime_until(&on->inactivity_timer->u.sands, NULL) /
 		    1000000LL;
 		h = s / 3600;
@@ -1041,7 +1041,7 @@ static void ospf6_neighbor_show_detail(struct vty *vty,
 				       db_desc_str);
 
 		json_object_int_add(json_neighbor, "dbDescSeqNumber",
-				    (unsigned long)ntohl(on->dbdesc_seqnum));
+				    (unsigned long)on->dbdesc_seqnum);
 
 		json_array = json_object_new_array();
 		json_object_int_add(json_neighbor, "summaryListCount",
@@ -1210,7 +1210,7 @@ static void ospf6_neighbor_show_detail(struct vty *vty,
 			(CHECK_FLAG(on->dbdesc_bits, OSPF6_DBDESC_MSBIT)
 				 ? "Master"
 				 : "Slave"),
-			(unsigned long)ntohl(on->dbdesc_seqnum));
+			(unsigned long)on->dbdesc_seqnum);
 
 		vty_out(vty, "    Summary-List: %d LSAs\n",
 			on->summary_list->count);

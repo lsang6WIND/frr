@@ -27,6 +27,7 @@
 #include "lib/printfrr.h"
 #include "lib/stream.h"
 #include "lib/frrevent.h"
+#include "lib/sockopt.h"
 
 #include "bfd.h"
 #include "bfddp_packet.h"
@@ -436,7 +437,7 @@ static int bfd_dplane_enqueue(struct bfd_dplane_ctx *bdc, const void *buf,
 		bdc->out_bytes_peak = rlen;
 
 	/* Schedule if it is not yet. */
-	if (bdc->outbufev == NULL)
+	if (!event_is_scheduled(bdc->outbufev))
 		event_add_write(master, bfd_dplane_write, bdc, bdc->sock,
 				&bdc->outbufev);
 
@@ -797,7 +798,7 @@ static void _bfd_dplane_update_session_counters(struct bfddp_message *msg,
 	bs->stats.rx_echo_pkt =
 		be64toh(msg->data.session_counters.echo_input_packets);
 	bs->stats.tx_echo_pkt =
-		be64toh(msg->data.session_counters.echo_output_bytes);
+		be64toh(msg->data.session_counters.echo_output_packets);
 }
 
 /**
@@ -1020,7 +1021,7 @@ static int bfd_dplane_finish_late(void)
 
 	/* Cancel accept thread and close socket. */
 	event_cancel(&bglobal.bg_dplane_sockev);
-	close(bglobal.bg_dplane_sock);
+	socket_close(&bglobal.bg_dplane_sock);
 
 	return 0;
 }

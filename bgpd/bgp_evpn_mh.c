@@ -424,6 +424,31 @@ static void bgp_evpn_es_route_del_all(struct bgp *bgp, struct bgp_evpn_es *es)
 	}
 }
 
+/* Purge all path-info entries from the ES table during daemon shutdown.
+ * The owning bgp instance may already have been deleted, so clear the
+ * table->bgp backpointer to avoid node teardown dereferencing freed state.
+ */
+static void bgp_evpn_es_route_table_purge(struct bgp_evpn_es *es)
+{
+	struct bgp_dest *dest;
+	struct bgp_path_info *pi, *nextpi;
+
+	if (!es->route_table)
+		return;
+
+	es->route_table->bgp = NULL;
+
+	for (dest = bgp_table_top(es->route_table); dest; dest = bgp_route_next(dest)) {
+		for (pi = bgp_dest_get_bgp_path_info(dest); (pi != NULL) && (nextpi = pi->next, 1);
+		     pi = nextpi) {
+			bgp_path_info_mark_for_delete(dest, pi);
+			dest = bgp_path_info_reap(dest, pi);
+
+			assert(dest);
+		}
+	}
+}
+
 /*****************************************************************************
  * Base APIs for creating MH routes (Type-1 or Type-4) on local ethernet
  * segment updates.
@@ -2305,7 +2330,7 @@ static void bgp_evpn_mac_update_on_es_local_chg(struct bgp_evpn_es *es,
 				&pi->net->rn->p, es->esi_str,
 				is_local ? "local" : "non-local");
 
-		attr_tmp = *pi->attr;
+		bgp_attr_dup_into(&attr_tmp, pi->attr);
 		if (is_local)
 			SET_FLAG(attr_tmp.es_flags, ATTR_ES_IS_LOCAL);
 		else
@@ -4432,7 +4457,8 @@ void bgp_evpn_es_evi_show_vni(struct vty *vty, vni_t vni,
  */
 static void bgp_evpn_es_cons_checks_timer_start(void)
 {
-	if (!bgp_mh_info->consistency_checking || bgp_mh_info->t_cons_check)
+	if (!bgp_mh_info->consistency_checking ||
+	    event_is_scheduled(bgp_mh_info->t_cons_check))
 		return;
 
 	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
@@ -5194,6 +5220,17 @@ void bgp_evpn_mh_init(void)
 	memset(&zero_esi_buf, 0, sizeof(esi_t));
 }
 
+void bgp_evpn_es_cleanup_routes(struct bgp *bgp)
+{
+	struct bgp_evpn_es *es;
+
+	if (!bgp_mh_info)
+		return;
+
+	RB_FOREACH (es, bgp_es_rb_head, &bgp_mh_info->es_rb_tree)
+		bgp_evpn_es_route_del_all(bgp, es);
+}
+
 void bgp_evpn_mh_finish(void)
 {
 	struct bgp_evpn_es *es;
@@ -5208,6 +5245,11 @@ void bgp_evpn_mh_finish(void)
 	 * cleanup here to ensure no memory leaks.
 	 */
 	RB_FOREACH_SAFE (es, bgp_es_rb_head, &bgp_mh_info->es_rb_tree, es_next) {
+		/* Reap any remaining ES-table paths so table pi_hash is empty
+		 * before bgp_table_unlock() in bgp_evpn_es_free().
+		 */
+		bgp_evpn_es_route_table_purge(es);
+
 		/* Force cleanup of any remaining structures that couldn't be
 		 * freed due to REMOTE flags or other guard conditions
 		 */
@@ -5229,8 +5271,7 @@ void bgp_evpn_mh_finish(void)
 		/* Clear local info (attempts normal cleanup and may free es) */
 		bgp_evpn_es_local_info_clear(es, true);
 	}
-	if (bgp_mh_info->t_cons_check)
-		event_cancel(&bgp_mh_info->t_cons_check);
+	event_cancel(&bgp_mh_info->t_cons_check);
 	list_delete(&bgp_mh_info->local_es_list);
 	list_delete(&bgp_mh_info->pend_es_list);
 	list_delete(&bgp_mh_info->ead_es_export_rtl);

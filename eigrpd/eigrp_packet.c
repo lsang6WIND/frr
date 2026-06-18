@@ -282,11 +282,11 @@ int eigrp_make_sha256_digest(struct eigrp_interface *ei, struct stream *s,
 
 	memset(&ctx, 0, sizeof(ctx));
 	buffer[0] = '\n';
-	memcpy(buffer + 1, key, strlen(key->string));
+	memcpy(buffer + 1, key->string, strlen(key->string));
 	memcpy(buffer + 1 + strlen(key->string), source_ip, strlen(source_ip));
 	HMAC__SHA256_Init(&ctx, buffer,
 			  1 + strlen(key->string) + strlen(source_ip));
-	HMAC__SHA256_Update(&ctx, ibuf, strlen(ibuf));
+	HMAC__SHA256_Update(&ctx, ibuf, backup_end);
 	HMAC__SHA256_Final(digest, &ctx);
 
 
@@ -1109,7 +1109,7 @@ struct TLV_IPv4_Internal_type *eigrp_read_ipv4_tlv(struct stream *s)
 
 	tlv->type = stream_getw(s);
 	tlv->length = stream_getw(s);
-	tlv->forward.s_addr = stream_getl(s);
+	tlv->forward.s_addr = htonl(stream_getl(s));
 	tlv->metric.delay = stream_getl(s);
 	tlv->metric.bandwidth = stream_getl(s);
 	tlv->metric.mtu[0] = stream_getc(s);

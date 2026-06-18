@@ -1059,11 +1059,11 @@ static uint8_t *ospfLsdbEntry(struct variable *v, oid *name, size_t *length,
 	case OSPFLSDBROUTERID: /* 4 */
 		return SNMP_IPADDRESS(lsah->adv_router);
 	case OSPFLSDBSEQUENCE: /* 5 */
-		return SNMP_INTEGER(lsah->ls_seqnum);
+		return SNMP_INTEGER(ntohl(lsah->ls_seqnum));
 	case OSPFLSDBAGE: /* 6 */
-		return SNMP_INTEGER(lsah->ls_age);
+		return SNMP_INTEGER(ntohs(lsah->ls_age));
 	case OSPFLSDBCHECKSUM: /* 7 */
-		return SNMP_INTEGER(lsah->checksum);
+		return SNMP_INTEGER(ntohs(lsah->checksum));
 	case OSPFLSDBADVERTISEMENT: /* 8 */
 		*var_len = ntohs(lsah->length);
 		return (uint8_t *)lsah;
@@ -2341,11 +2341,11 @@ static uint8_t *ospfExtLsdbEntry(struct variable *v, oid *name, size_t *length,
 	case OSPFEXTLSDBROUTERID:
 		return SNMP_IPADDRESS(lsah->adv_router);
 	case OSPFEXTLSDBSEQUENCE:
-		return SNMP_INTEGER(lsah->ls_seqnum);
+		return SNMP_INTEGER(ntohl(lsah->ls_seqnum));
 	case OSPFEXTLSDBAGE:
-		return SNMP_INTEGER(lsah->ls_age);
+		return SNMP_INTEGER(ntohs(lsah->ls_age));
 	case OSPFEXTLSDBCHECKSUM:
-		return SNMP_INTEGER(lsah->checksum);
+		return SNMP_INTEGER(ntohs(lsah->checksum));
 	case OSPFEXTLSDBADVERTISEMENT:
 		*var_len = ntohs(lsah->length);
 		return (uint8_t *)lsah;
@@ -2533,6 +2533,22 @@ static int ospf_snmp_init(struct event_loop *tm)
 	return 0;
 }
 
+static int ospf_snmp_terminate(void)
+{
+	if (ospf_snmp_iflist) {
+		ospf_snmp_iflist->del = (void (*)(void *))ospf_snmp_if_free;
+		list_delete(&ospf_snmp_iflist);
+	}
+
+	if (ospf_snmp_vl_table) {
+		route_table_finish(ospf_snmp_vl_table);
+		ospf_snmp_vl_table = NULL;
+	}
+
+	smux_terminate();
+	return 0;
+}
+
 static int ospf_snmp_module_init(void)
 {
 	hook_register(ospf_if_update, ospf_snmp_if_update);
@@ -2543,6 +2559,7 @@ static int ospf_snmp_module_init(void)
 	hook_register(ospf_nsm_change, ospf_snmp_nsm_change);
 
 	hook_register(frr_late_init, ospf_snmp_init);
+	hook_register(frr_fini, ospf_snmp_terminate);
 	return 0;
 }
 

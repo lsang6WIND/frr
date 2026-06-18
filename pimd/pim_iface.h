@@ -18,6 +18,9 @@
 #include "pim_igmp.h"
 #include "pim_upstream.h"
 #include "pim_ifchannel.h"
+
+struct prefix_list;
+struct access_list;
 #include "bfd.h"
 #include "pim_str.h"
 #include "pim_routemap.h"
@@ -76,6 +79,7 @@ struct pim_interface {
 
 	bool gm_enable : 1;
 	bool gm_proxy : 1; /* proxy IGMP joins/prunes */
+	struct pim_filter_ref gm_proxy_filter; /* route-map filter for proxied (S,G) */
 
 	ifindex_t mroute_vif_index;
 	struct pim_instance *pim;
@@ -162,9 +166,11 @@ struct pim_interface {
 	int pim_dr_num_nondrpri_neighbors; /* neighbors without dr_pri */
 
 	/* boundary prefix-list (group) */
-	struct prefix_list *boundary_oil_plist;
+	char *boundary_oil_plist;
+	struct prefix_list *boundary_oil_plist_p;
 	/* boundary access-list (source and group) */
-	struct access_list *boundary_acl;
+	char *boundary_acl;
+	struct access_list *boundary_acl_p;
 
 	/* Turn on Active-Active for this interface */
 	bool activeactive;
@@ -202,6 +208,9 @@ struct pim_interface {
 	uint32_t igmp_ifstat_joins_sent;
 	uint32_t igmp_ifstat_joins_failed;
 	uint32_t igmp_peak_group_count;
+
+	bool autorp_joined_discovery;
+	bool autorp_joined_announce;
 
 	struct {
 		bool enabled;
@@ -299,6 +308,11 @@ int pim_if_ifchannel_count(struct pim_interface *pim_ifp);
 void pim_iface_init(void);
 void pim_pim_interface_delete(struct interface *ifp);
 void pim_gm_interface_delete(struct interface *ifp);
+
+void pim_boundary_oil_plist_set(struct pim_interface *pim_ifp, const char *name);
+void pim_boundary_acl_set(struct pim_interface *pim_ifp, const char *name);
+void pim_boundary_prefix_list_update(struct prefix_list *plist);
+void pim_boundary_access_list_update(struct access_list *access);
 
 const char *pim_mod_str(enum pim_iface_mode mode);
 

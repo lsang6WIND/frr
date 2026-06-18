@@ -581,8 +581,6 @@ static void main_dispatch_ldpe(struct event *event)
 	ssize_t			 n;
 	int			 shut = 0;
 
-	iev->ev_read = NULL;
-
 	if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
 		fatal("imsg_read error");
 
@@ -645,8 +643,6 @@ static void main_dispatch_lde(struct event *event)
 	ssize_t		 n;
 	int		 shut = 0;
 	struct zapi_rlfa_response *rlfa_labels;
-
-	iev->ev_read = NULL;
 
 	if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
 		fatal("imsg_read error");
@@ -747,8 +743,6 @@ void ldp_write_handler(struct event *event)
 	struct imsgev *iev = EVENT_ARG(event);
 	struct imsgbuf	*ibuf = &iev->ibuf;
 	ssize_t		 n;
-
-	iev->ev_write = NULL;
 
 	if ((n = msgbuf_write(&ibuf->w)) == -1 && errno != EAGAIN)
 		fatal("msgbuf_write");
@@ -2029,6 +2023,7 @@ void
 config_clear(struct ldpd_conf *conf)
 {
 	struct ldpd_conf	*xconf;
+	struct tnbr		*tnbr;
 
 	/*
 	 * Merge current config with an empty config, this will deactivate
@@ -2044,5 +2039,21 @@ config_clear(struct ldpd_conf *conf)
 	xconf->flags = conf->flags;
 	merge_config(conf, xconf);
 	free(xconf);
+
+	/*
+	 * merge_tnbrs() only walks tnbrs that have F_TNBR_CONFIGURED set;
+	 * dynamic targeted neighbours learned from received hello packets
+	 * (F_TNBR_DYNAMIC, recv_hello() in hello.c) and rlfa tnbrs created
+	 * by ldpe_rlfa_init() in rlfa.c are skipped, so they remain in the
+	 * tree and would leak when conf is freed below. Drain the tree
+	 * explicitly before letting the container go.
+	 */
+	while (!RB_EMPTY(tnbr_head, &conf->tnbr_tree)) {
+		tnbr = RB_ROOT(tnbr_head, &conf->tnbr_tree);
+		event_cancel(&tnbr->hello_timer);
+		RB_REMOVE(tnbr_head, &conf->tnbr_tree, tnbr);
+		free(tnbr);
+	}
+
 	free(conf);
 }

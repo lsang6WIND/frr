@@ -64,6 +64,21 @@ which versions of the python protobuf packages you need to install.
    python3 -m pip install grpcio grpcio-tools
 
 
+Kernel Modules
+""""""""""""""
+
+Some topotests rely on kernel features that ship as loadable modules. For
+example ``bfd_ospf_quicknbr_topo1`` uses the ``tc netem`` qdisc to blackhole
+traffic, which requires the ``sch_netem`` module. The test will attempt to
+``modprobe sch_netem`` itself, but if the module is not present in your kernel
+image the test is skipped. To make sure it is available (and to load it ahead of
+time) run:
+
+.. code:: shell
+
+   modprobe sch_netem
+
+
 Enable Coredumps
 """"""""""""""""
 
@@ -95,7 +110,7 @@ following steps will get you there on Ubuntu 22.04/24.04.
 .. code:: shell
 
    apt install libsnmp-dev
-   apt install snmpd snmp
+   apt install snmpd snmp snmptrapd
    apt install snmp-mibs-downloader
    download-mibs
    wget https://raw.githubusercontent.com/FRRouting/frr-mibs/main/iana/IANA-IPPM-METRICS-REGISTRY-MIB -O /usr/share/snmp/mibs/iana/IANA-IPPM-METRICS-REGISTRY-MIB
@@ -116,7 +131,7 @@ following steps will get you there on Ubuntu 22.04/24.04.
 
    edit /etc/snmp/snmp.conf to look like this
    # As the snmp packages come without MIB files due to license reasons, loading
-   # of MIBs is disabled by default. If you added the MIBs you can reenable
+   # of MIBs is disabled by default. If you added the MIBs you can re-enable
    # loading them by commenting out the following line.
    mibs +ALL
 
@@ -372,7 +387,7 @@ Everything works exactly as with a host run except that you specify the name of
 the container, or the container-id, using the `-C` or ``--container`` option.
 ``analyze.py`` will then use the results inside that containers
 ``/tmp/topotests`` directory. It will extract and save those results when you
-pass the ``-A`` or ``-a`` options just as withe host results.
+pass the ``-A`` or ``-a`` options just as with host results.
 
 
 Execute single test
@@ -595,7 +610,7 @@ Spawning ``vtysh`` or Shells on Routers
 Topotest can automatically launch a shell or ``vtysh`` for any or all routers in
 a test. This is enabled by specifying 1 of 2 CLI arguments ``--shell`` or
 ``--vtysh``. Both of these options can be set to a single router value, multiple
-comma-seperated values, or ``all``.
+comma-separated values, or ``all``.
 
 When either of these options are specified topotest will pause after setup and
 each test to allow for inspection of the router state.
@@ -635,7 +650,7 @@ breakpoints for any test run. This is enabled by specifying 1 or 2 CLI arguments
 ``--gdb-routers`` and ``--gdb-daemons``. Additionally ``--gdb-breakpoints`` can
 be used to automatically set breakpoints in the launched ``gdb`` processes.
 
-Each of these options can be set to a single value, multiple comma-seperated
+Each of these options can be set to a single value, multiple comma-separated
 values, or ``all``. If ``--gdb-routers`` is empty but ``--gdb_daemons`` is set
 then the given daemons will be launched in ``gdb`` on all routers in the test.
 Likewise if ``--gdb_routers`` is set, but ``--gdb_daemons`` is empty then all
@@ -718,7 +733,7 @@ either ``all`` or a comma-separated list of types:
 
    sudo -E pytest --valgrind-memleaks all-protocol-startup
 
-.. note:: GDB can be used in conjection with valgrind.
+.. note:: GDB can be used in conjunction with valgrind.
 
    When you enable ``--valgrind-memleaks`` and you also launch various daemons
    under GDB (debug_with_gdb_) topotest will connect the two utilities using
@@ -731,7 +746,7 @@ Collecting Performance Data using perf(1)
 Topotest can automatically launch any daemon under ``perf(1)`` to collect
 performance data. The daemon is run in non-daemon mode with ``perf record -g``.
 The ``perf.data`` file will be saved in the router specific directory under the
-tests run directoy.
+tests run directory.
 
 Here's an example of collecting performance data from ``mgmtd`` on router ``r1``
 during the config_timing test.
@@ -753,7 +768,7 @@ Topotest can automatically launch any daemon under ``rr(1)`` to collect
 execution state. The daemon is run in the foreground with ``rr record``.
 
 The execution state will be saved in the router specific directory
-(in a `rr` subdir that rr creates) under the test's run directoy.
+(in a `rr` subdir that rr creates) under the test's run directory.
 
 Here's an example of collecting ``rr`` execution state from ``mgmtd`` on router
 ``r1`` during the ``config_timing`` test.
@@ -820,7 +835,7 @@ that are employed to allow for the test to be reproduced reliably
 
 This allows you to run multiple copies of the same test with one full test run.
 Additionally if you need to modify the test you don't need to recopy everything
-to make it work.  By adding multiple copies of the same occassionally failing test
+to make it work.  By adding multiple copies of the same occasionally failing test
 you raise the odds of it failing again.  Additionally you have easily accessible
 good and bad runs to compare.
 
@@ -828,7 +843,7 @@ good and bad runs to compare.
 
    sudo -E python3 -m pytest -n <some value> --dist=loadfile
 
-Choose a n value that is greater than the number of cpu's avalaible on the system.
+Choose a n value that is greater than the number of cpu's available on the system.
 This changes the timing and may or may not make it more likely that the test fails.
 Be aware, though, that this changes memory requirements as well as may make other
 tests fail more often as well.  You should choose values that do not cause the system
@@ -892,7 +907,7 @@ the image. If you need to force a complete recompile, you can set
 
 By default, ``frr-topotests.sh`` will build frr and run pytest. If you append
 arguments and the first one starts with ``/`` or ``./``, they will replace the
-call to pytest. If the appended arguments do not match this patttern, they will
+call to pytest. If the appended arguments do not match this pattern, they will
 be provided to pytest as arguments.  So, to run a specific test with more
 verbose logging:
 
@@ -1217,7 +1232,7 @@ that using the following example commands:
 
 .. code:: shell
 
-   $ # Running your bootstraped topology
+   $ # Running your bootstrapped topology
    $ sudo -E pytest -s --topology-only new-topo/test_new_topo.py
    $ # Running the test_template.py topology
    $ sudo -E pytest -s --topology-only example-test/test_template.py
@@ -1438,6 +1453,137 @@ or using unified config (specifying which daemons to run is optional):
        tgen.stop_topology()
 
 
+.. _topotests-restart:
+
+Restarting routers and daemons
+""""""""""""""""""""""""""""""
+
+Many tests need to restart FRR during a testcase — for example to verify state
+recovery after a process crash, graceful restart, or full FRR reload.  The
+helpers live in :file:`tests/topotests/lib/common_config.py` and wrap the
+:file:`TopoRouter` methods in :file:`tests/topotests/lib/topogen.py`.
+
+Naming and scope
+^^^^^^^^^^^^^^^^
+
+Topotest uses **router** for a ``TopoRouter``: a mininet network namespace
+running FRR.  The stop/start helpers operate on **FRR daemons only**
+(``zebra``, ``bgpd``, ``pimd``, and the other daemons configured for that
+router, plus special cases such as ``fpm_listener``).  They do **not**:
+
+- tear down the mininet host or network namespace
+- stop non-FRR processes in that namespace (traffic tools, ExaBGP, etc.)
+- replace ``tgen.stop_topology()`` at teardown
+
+Historical helpers use the **router** suffix — ``stop_router()``,
+``start_router()``, ``kill_router_daemons()``, ``start_router_daemons()`` — even
+though they manage FRR processes, not the whole namespace.  ``restart_frr()``
+follows the more explicit naming: it calls ``stop_router()`` then
+``start_router()`` and restarts the full FRR stack on one router.
+
+Full FRR restart
+^^^^^^^^^^^^^^^^
+
+Use ``stop_router()`` and ``start_router()`` to stop and start **all FRR
+daemons** on one router.  By default ``stop_router()`` runs ``write memory``
+first, so the saved configuration under the test log directory is reloaded on
+start.  Pass ``save_config=False`` when the running config must not be persisted
+(common in graceful-restart tests).  For the common case, use ``restart_frr()``
+which calls both in sequence.
+
+.. code:: py
+
+   from lib.common_config import restart_frr, start_router, stop_router
+
+   restart_frr(tgen, "r1")
+
+   # or explicitly:
+   stop_router(tgen, "r1")
+   start_router(tgen, "r1")
+
+   # do not persist running config before stop/restart:
+   restart_frr(tgen, "r1", save_config=False)
+
+``start_router()`` waits five seconds after starting daemons.
+
+**Examples:**
+
+- :file:`tests/topotests/pim_wrongvif_compat/test_pim_wrongvif_compat.py` —
+  ``restart_frr()`` helper and FRR restart recovery tests
+- :file:`tests/topotests/bgp_gr_restart_retain_routes/test_bgp_gr_per_neighbor_restart_retain_routes.py` —
+  stop FRR on a router, verify neighbors retain routes, then start again
+- :file:`tests/topotests/multicast_pim_uplink_topo1/test_multicast_pim_uplink_topo1.py` —
+  mroute behavior after FRR daemon stop/start
+
+Specific daemon restart
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Use ``kill_router_daemons()`` and ``start_router_daemons()`` when only one or a
+few daemons should be restarted.  ``kill_router_daemons()`` sends **SIGKILL** (a
+hard kill, not a graceful shutdown).  By default it also runs ``write memory``
+before killing; pass ``save_config=False`` when the running config must not be
+persisted (common in graceful-restart tests).
+
+.. code:: py
+
+   from lib.common_config import kill_router_daemons, start_router_daemons
+
+   kill_router_daemons(tgen, "rt1", ["ospfd"], save_config=False)
+   start_router_daemons(tgen, "rt1", ["ospfd"])
+
+Daemon names use the binary name (``"bgpd"``, ``"ospfd"``, ``"pimd"``, etc.).
+
+Some BGP graceful-restart tests kill a daemon, then call ``start_router_daemons()``
+and reapply configuration with ``vtysh -f`` when the on-disk config is not
+enough.  See
+:file:`tests/topotests/bgp_gr_multihop/test_bgp_gr_multihop.py` and
+:file:`tests/topotests/bgp_gr_fib_suppress/test_bgp_gr_fib_suppress.py`.
+
+**Examples:**
+
+- :file:`tests/topotests/ospf_gr_topo1/test_ospf_gr_topo1.py` — prepare GR,
+  kill ``ospfd``, start it again
+- :file:`tests/topotests/bgp_gr_multihop/test_bgp_gr_multihop.py` — kill and
+  restart ``bgpd`` only
+
+Lower-level ``TopoRouter`` methods
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The helpers above delegate to ``TopoRouter`` methods in
+:file:`tests/topotests/lib/topogen.py`.  These also affect FRR daemons only;
+call them directly when you already hold a router object:
+
+.. code:: py
+
+   router = tgen.gears["r1"]
+   router.stop()                        # stop all FRR daemons (SIGTERM, then SIGKILL)
+   router.start()                       # start all configured FRR daemons
+   router.killDaemons(["bgpd"])         # SIGKILL specific daemons
+   router.startDaemons(["bgpd"])        # start specific daemons
+
+``tgen.start_router("r1")`` starts all FRR daemons on a single router without
+stopping them first.  ``tgen.stop_topology()`` stops the entire topology,
+including all routers and their namespaces.
+
+Choosing an approach
+^^^^^^^^^^^^^^^^^^^^
+
++---------------------------+-----------------------------------------------+
+| Goal                      | Recommended API                               |
++===========================+===============================================+
+| Full FRR reload on router | ``restart_frr`` (or ``stop_router`` +         |
+|                           | ``start_router``)                             |
++---------------------------+-----------------------------------------------+
+| Simulate daemon crash     | ``kill_router_daemons`` +                     |
+|                           | ``start_router_daemons``                      |
++---------------------------+-----------------------------------------------+
+| OSPF graceful restart     | ``graceful-restart prepare`` via ``vtysh``,   |
+|                           | then ``kill_router_daemons(...,                |
+|                           | save_config=False)`` or                       |
+|                           | ``restart_frr(..., save_config=False)``       |
++---------------------------+-----------------------------------------------+
+
+
 Requirements:
 
 - Directory name for a new topotest must not contain hyphen (``-``) characters.
@@ -1608,6 +1754,7 @@ logging messages can be displayed by modifying the test configuration file
 
 Instructions for use, write or debug topologies can be found in :ref:`topotests-guidelines`.
 To learn/remember common code snippets see :ref:`topotests-snippets`.
+For restarting FRR or individual daemons on a router during a test, see :ref:`topotests-restart`.
 For information on multicast testing in topotests, see :ref:`topotest-multicast`.
 
 Before creating a new topology, make sure that there isn't one already that

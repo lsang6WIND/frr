@@ -38,8 +38,11 @@ struct mgmt_fe_session_ctx {
 	uint64_t txn_id;
 	uint64_t cfg_txn_id;
 	uint8_t notify_format;
+	uint32_t periodic_interval;
 	uint8_t ds_locked[MGMTD_DS_MAX_ID];
 	const char **notify_xpaths;
+	const char **periodic_xpaths;
+	struct event *periodic_notify_timer;
 	struct event *proc_cfg_txn_clnp;
 	struct event *proc_show_txn_clnp;
 
@@ -77,6 +80,7 @@ DECLARE_RBTREE_UNIQ(ns_string, struct ns_string, link, ns_string_compare);
 
 static struct msg_conn *fe_adapter_create(int conn_fd, union sockunion *from);
 static void fe_session_compute_commit_timers(struct mgmt_commit_stats *cmt_stats);
+static void fe_session_update_periodic_notify_timer(struct mgmt_fe_session_ctx *session);
 
 /* ---------------- */
 /* Global variables */
@@ -211,13 +215,13 @@ static void ns_string_add_session(uint64_t req_id, const char **selectors, uint6
 		clients |= ns_string_add_string(*sp, darr_strlen(*sp), session_id, &all_clients);
 
 	if (!(all_clients | upd_clients)) {
-		_dbg("No backends publishing data for selectors '%pSAd' for session-id: %Lu",
+		_dbg("No backends publishing data for selectors '%pSAd' for session-id: %" PRIu64,
 		     selectors, session_id);
 		return;
 	}
 	if (!(clients | upd_clients))
-		_dbg("No backends to update for selectors: '%pSAd' for session-id: %Lu", selectors,
-		     session_id);
+		_dbg("No backends to update for selectors: '%pSAd' for session-id: %" PRIu64,
+		     selectors, session_id);
 	else
 		/*
 		 * Send a message to set the selectors on the changed clients,
@@ -231,7 +235,7 @@ static void ns_string_add_session(uint64_t req_id, const char **selectors, uint6
 	if (!all_clients || !selectors)
 		return;
 
-	_dbg("Creating new data-push for session-id: %Lu", session_id);
+	_dbg("Creating new data-push for session-id: %" PRIu64, session_id);
 
 	/* Send a second message requesting a full state dump for the session */
 	mgmt_txn_send_notify_selectors(req_id, session_id, all_clients, false, selectors);
@@ -242,6 +246,61 @@ void mgmt_fe_ns_string_add_be_client(uint client_id, const char **selectors)
 	uint64_t session_id = MGMT_BE_CLIENT_TO_SESSION_ID(client_id);
 
 	ns_string_add_session(0, selectors, session_id, false, 0);
+}
+
+static uint64_t fe_session_notify_clients(struct mgmt_fe_session_ctx *session)
+{
+	const char **sp;
+	uint64_t clients = 0;
+
+	/* Resolve BE adapters that can serve the session's selector set. */
+	darr_foreach_p (session->periodic_xpaths, sp)
+		clients |= mgmt_be_interested_clients(*sp, MGMT_BE_XPATH_SUBSCR_TYPE_OPER,
+						      "periodic-notify-timer");
+
+	return clients;
+}
+
+static void fe_session_periodic_notify_timer(struct event *event)
+{
+	struct mgmt_fe_session_ctx *session = EVENT_ARG(event);
+	uint64_t clients;
+
+	session->periodic_notify_timer = NULL;
+
+	if (!darr_len(session->periodic_xpaths))
+		return;
+
+	clients = fe_session_notify_clients(session);
+	if (clients)
+		/*
+		 * Use get_only flow (session-id refer_id) to request current state
+		 * and forward it as NOTIFY data to this FE session.
+		 */
+		mgmt_txn_send_notify_selectors(0, session->session_id, clients, false,
+					       session->periodic_xpaths);
+
+	fe_session_update_periodic_notify_timer(session);
+}
+
+static void fe_session_update_periodic_notify_timer(struct mgmt_fe_session_ctx *session)
+{
+	if (!darr_len(session->periodic_xpaths)) {
+		event_cancel(&session->periodic_notify_timer);
+		return;
+	}
+
+	assert(session->periodic_interval);
+
+	if (event_is_scheduled(session->periodic_notify_timer) &&
+	    event_timer_remain_msec(session->periodic_notify_timer) >
+		    session->periodic_interval)
+		event_cancel(&session->periodic_notify_timer);
+
+	if (!event_is_scheduled(session->periodic_notify_timer))
+		event_add_timer_msec(mgmt_loop, fe_session_periodic_notify_timer, session,
+				     session->periodic_interval,
+				     &session->periodic_notify_timer);
 }
 
 uint64_t *mgmt_fe_ns_string_select(struct nb_node *nb_node, const char *notif)
@@ -502,7 +561,9 @@ static void fe_session_cleanup(struct mgmt_fe_session_ctx **sessionp)
 	rm_clients = ns_string_remove_session(session->session_id);
 	if (rm_clients && !mm->terminating)
 		mgmt_txn_send_notify_selectors(0, MGMTD_SESSION_ID_NONE, rm_clients, false, NULL);
+	event_cancel(&session->periodic_notify_timer);
 	darr_free_free(session->notify_xpaths);
+	darr_free_free(session->periodic_xpaths);
 	hash_release(mgmt_fe_sessions, session);
 	XFREE(MTYPE_MGMTD_FE_SESSION, session);
 	*sessionp = NULL;
@@ -523,6 +584,7 @@ static struct mgmt_fe_session_ctx *fe_session_create(struct mgmt_fe_client_adapt
 	session->client_id = client_id;
 	session->adapter = adapter;
 	session->notify_format = notify_format;
+	session->periodic_interval = 0;
 	session->txn_id = MGMTD_TXN_ID_NONE;
 	session->cfg_txn_id = MGMTD_TXN_ID_NONE;
 	LIST_INSERT_HEAD(&adapter->sessions, session, link);
@@ -623,7 +685,7 @@ int mgmt_fe_adapter_txn_error(uint64_t txn_id, uint64_t req_id, bool short_circu
 
 static void fe_session_send_commit_reply(struct mgmt_fe_session_ctx *session, uint64_t req_id,
 					 uint8_t source, uint8_t target, uint8_t action,
-					 bool unlock)
+					 bool unlock, const char *info)
 {
 	struct mgmt_msg_commit_reply *msg;
 	int ret;
@@ -638,14 +700,18 @@ static void fe_session_send_commit_reply(struct mgmt_fe_session_ctx *session, ui
 	msg->action = action;
 	msg->unlock = unlock;
 
-	_dbg("Sending commit-reply session-id %Lu on %s req-id %Lu source-ds: %s target-ds: %s action: %u unlock: %d",
+	if (info && info[0])
+		mgmt_msg_native_add_str(msg, info);
+
+	_dbg("Sending commit-reply session-id %" PRIu64 " on %s req-id %" PRIu64
+	     " source-ds: %s target-ds: %s action: %u unlock: %d",
 	     session->session_id, session->adapter->name, req_id, mgmt_ds_id2name(source),
 	     mgmt_ds_id2name(target), action, unlock);
 
 	ret = fe_adapter_send_msg(session->adapter, msg, mgmt_msg_native_get_msg_len(msg), false);
 	mgmt_msg_native_free_msg(msg);
 	if (ret) {
-		_log_err("Failed to send COMMIT_REPLY to session-id %Lu", session->session_id);
+		_log_err("Failed to send COMMIT_REPLY to session-id %" PRIu64, session->session_id);
 		msg_conn_disconnect(session->adapter->conn, false);
 	}
 }
@@ -705,14 +771,16 @@ int mgmt_fe_send_commit_cfg_reply(uint64_t session_id, uint64_t txn_id, enum mgm
 	fe_session_compute_commit_timers(&session->adapter->cmt_stats);
 
 	if (result == MGMTD_SUCCESS || result == MGMTD_NO_CFG_CHANGES)
-		fe_session_send_commit_reply(session, req_id, src_ds_id, dst_ds_id, action, unlock);
+		fe_session_send_commit_reply(session, req_id, src_ds_id, dst_ds_id, action, unlock,
+					     error_if_any);
 	else {
-		ret = fe_session_send_error(
-			session, req_id, false, mgmt_result_to_error(result),
-			"commit failed session-id %Lu on %s req-id %Lu source-ds: %s target-ds: %s validate-only: %u: reason: '%s'",
-			session->session_id, session->adapter->name, req_id,
-			mgmt_ds_id2name(src_ds_id), mgmt_ds_id2name(dst_ds_id), validate_only,
-			error_if_any ?: "");
+		ret = fe_session_send_error(session, req_id, false, mgmt_result_to_error(result),
+					    "commit failed session-id %" PRIu64
+					    " on %s req-id %" PRIu64
+					    " source-ds: %s target-ds: %s validate-only: %u: reason: '%s'",
+					    session->session_id, session->adapter->name, req_id,
+					    mgmt_ds_id2name(src_ds_id), mgmt_ds_id2name(dst_ds_id),
+					    validate_only, error_if_any ?: "");
 	}
 
 	assert(session->cfg_txn_id == txn_id);
@@ -728,7 +796,8 @@ static void fe_session_handle_commit(struct mgmt_fe_session_ctx *session, void *
 	struct mgmt_ds_ctx *src_ds_ctx, *dst_ds_ctx;
 	uint64_t txn_id;
 
-	_dbg("Got COMMIT for source-ds: %s target-ds: %s action: %s on session-id %Lu from '%s'",
+	_dbg("Got COMMIT for source-ds: %s target-ds: %s action: %s on session-id %" PRIu64
+	     " from '%s'",
 	     mgmt_ds_id2name(msg->source), mgmt_ds_id2name(msg->target),
 	     msg->action == MGMT_MSG_COMMIT_VALIDATE ? "validate"
 	     : msg->action == MGMT_MSG_COMMIT_ABORT  ? "abort"
@@ -752,7 +821,7 @@ static void fe_session_handle_commit(struct mgmt_fe_session_ctx *session, void *
 	if (mgmt_ds_is_txn_locked(src_ds_ctx, &txn_id) ||
 	    mgmt_ds_is_txn_locked(dst_ds_ctx, &txn_id)) {
 		fe_session_send_error(session, msg->req_id, false, EBUSY,
-				      "source/target datastore is locked by another transaction txn-id: %Lu",
+				      "source/target datastore is locked by another transaction txn-id: %" PRIu64,
 				      txn_id);
 		return;
 	}
@@ -760,7 +829,7 @@ static void fe_session_handle_commit(struct mgmt_fe_session_ctx *session, void *
 	/* User must always have lock on source */
 	if (!session->ds_locked[msg->source]) {
 		fe_session_send_error(session, msg->req_id, false, EBUSY,
-				      "source not locked by session-id: %Lu on '%s'",
+				      "source not locked by session-id: %" PRIu64 " on '%s'",
 				      session->session_id, session->adapter->name);
 		return;
 	}
@@ -768,7 +837,8 @@ static void fe_session_handle_commit(struct mgmt_fe_session_ctx *session, void *
 	/* For apply/abort user must also have lock on target */
 	if (msg->action != MGMT_MSG_COMMIT_VALIDATE && !session->ds_locked[msg->target]) {
 		fe_session_send_error(session, msg->req_id, false, EBUSY,
-				      "target not locked for apply/abort by session-id: %Lu on '%s'",
+				      "target not locked for apply/abort by session-id: %" PRIu64
+				      " on '%s'",
 				      session->session_id, session->adapter->name);
 		return;
 	}
@@ -787,12 +857,13 @@ static void fe_session_handle_commit(struct mgmt_fe_session_ctx *session, void *
 		session->cfg_txn_id = mgmt_create_txn(session->session_id, MGMTD_TXN_TYPE_CONFIG);
 		if (session->cfg_txn_id == MGMTD_SESSION_ID_NONE) {
 			fe_session_send_error(session, msg->req_id, false, ENOMEM,
-					      "failed to create config transaction for session-id: %Lu on '%s'",
+					      "failed to create config transaction for session-id: %" PRIu64
+					      " on '%s'",
 					      session->session_id, session->adapter->name);
 			return;
 		}
-		_dbg("created config txn-id: %Lu for session-id %Lu on '%s'", session->cfg_txn_id,
-		     session->session_id, session->adapter->name);
+		_dbg("created config txn-id: %" PRIu64 " for session-id %" PRIu64 " on '%s'",
+		     session->cfg_txn_id, session->session_id, session->adapter->name);
 	}
 
 	/*
@@ -822,7 +893,8 @@ static int fe_session_send_lock_reply(struct mgmt_fe_session_ctx *session, uint6
 	msg->datastore = datastore;
 	msg->lock = lock;
 
-	_dbg("Sending lock-reply from adapter %s on session-id %Lu req-id %Lu datastore %u lock %u scok %u",
+	_dbg("Sending lock-reply from adapter %s on session-id %" PRIu64 " req-id %" PRIu64
+	     " datastore %u lock %u scok %u",
 	     session->adapter->name, session->session_id, req_id, datastore, lock,
 	     short_circuit_ok);
 
@@ -844,7 +916,7 @@ static void fe_session_handle_lock(struct mgmt_fe_session_ctx *session, void *_m
 	bool lock = msg->lock;
 	int ret;
 
-	_dbg("Got %sLOCK for DS:%s for session-id %Lu from '%s'", msg->lock ? "" : "UN",
+	_dbg("Got %sLOCK for DS:%s for session-id %" PRIu64 " from '%s'", msg->lock ? "" : "UN",
 	     mgmt_ds_id2name(datastore), msg->refer_id, session->adapter->name);
 
 	if (datastore != MGMTD_DS_CANDIDATE && datastore != MGMTD_DS_RUNNING) {
@@ -859,15 +931,17 @@ static void fe_session_handle_lock(struct mgmt_fe_session_ctx *session, void *_m
 	if (lock && mgmt_ds_is_locked(ds_ctx, &lock_session, &txn_id) &&
 	    lock_session != session->session_id) {
 		fe_session_send_error(session, msg->req_id, short_circuit_ok, EBUSY,
-				      "Lock already taken on datastore %s by session: %Lu txn-id: %Lu",
+				      "Lock already taken on datastore %s by session: %" PRIu64
+				      " txn-id: %" PRIu64,
 				      mgmt_ds_id2name(datastore), lock_session, txn_id);
 		return;
 	} else if (lock) {
 		ret = mgmt_fe_session_write_lock_ds(datastore, ds_ctx, session);
 		if (ret) {
-			fe_session_send_error(session, msg->req_id, short_circuit_ok, EBUSY,
-					      "Unexpected error %d trying to lock datastore by session-id: %Lu",
-					      ret, session->session_id);
+			fe_session_send_error(
+				session, msg->req_id, short_circuit_ok, EBUSY,
+				"Unexpected error %d trying to lock datastore by session-id: %" PRIu64,
+				ret, session->session_id);
 			return;
 		}
 	} else {
@@ -878,7 +952,7 @@ static void fe_session_handle_lock(struct mgmt_fe_session_ctx *session, void *_m
 	if (fe_session_send_lock_reply(session, msg->req_id, msg->datastore, msg->lock,
 				       short_circuit_ok)) {
 		assert(!short_circuit_ok);
-		_log_err("Failed to send LOCK_REPLY to session-id %Lu", session->session_id);
+		_log_err("Failed to send LOCK_REPLY to session-id %" PRIu64, session->session_id);
 		msg_conn_disconnect(session->adapter->conn, false);
 	}
 }
@@ -1242,7 +1316,7 @@ static void fe_session_handle_edit(struct mgmt_fe_session_ctx *session, void *_m
 	if (commit &&
 	    (mgmt_ds_is_txn_locked(can_ds, &txn_id) || mgmt_ds_is_txn_locked(run_ds, &txn_id))) {
 		fe_session_send_error(session, msg->req_id, false, -EBUSY,
-				      "datastores are locked by another transaction txn-id: %Lu",
+				      "datastores are locked by another transaction txn-id: %" PRIu64,
 				      txn_id);
 		return;
 	}
@@ -1287,8 +1361,9 @@ static void fe_session_handle_edit(struct mgmt_fe_session_ctx *session, void *_m
 	if (ret && ret == NB_ERR_NO_CHANGES)
 		ret = NB_OK;
 	else if (ret)
-		_dbg("Edit failed for txn-id %Lu req-id %Lu: %s: restoring candidate", txn_id,
-		     msg->req_id, errstr[0] ? errstr : "unknown reason");
+		_dbg("Edit failed for txn-id %" PRIu64 " req-id %" PRIu64
+		     ": %s: restoring candidate",
+		     txn_id, msg->req_id, errstr[0] ? errstr : "unknown reason");
 	else if (commit) {
 		/* Get a TXN for the commit */
 		txn_id = mgmt_create_txn(session->session_id, MGMTD_TXN_TYPE_CONFIG);
@@ -1298,7 +1373,7 @@ static void fe_session_handle_edit(struct mgmt_fe_session_ctx *session, void *_m
 		}
 		session->cfg_txn_id = txn_id;
 
-		_dbg("Created new config txn-id: %Lu for session-id: %Lu", txn_id,
+		_dbg("Created new config txn-id: %" PRIu64 " for session-id: %" PRIu64, txn_id,
 		     session->session_id);
 
 		/* And this is modifying the running */
@@ -1329,6 +1404,8 @@ static void fe_session_handle_notify_select(struct mgmt_fe_session_ctx *session,
 	const char **new;
 	const char **sp;
 	uint64_t rm_clients = 0;
+	const char ***xpaths = NULL;
+	bool is_periodic;
 
 
 	if (msg_len >= sizeof(*msg)) {
@@ -1337,6 +1414,37 @@ static void fe_session_handle_notify_select(struct mgmt_fe_session_ctx *session,
 			fe_session_send_error(session, req_id, false, -EINVAL, "Invalid message");
 			return;
 		}
+	}
+
+	if (msg->mode != NOTIFY_MODE_ON_CHANGE && msg->mode != NOTIFY_MODE_PERIODIC) {
+		fe_session_send_error(session, req_id, false, -EINVAL,
+				      "Invalid mode: %u", msg->mode);
+		darr_free_free(selectors);
+		return;
+	}
+	/* ON_CHANGE must not carry interval data. */
+	if (msg->mode == NOTIFY_MODE_ON_CHANGE && msg->mode_data) {
+		fe_session_send_error(session, req_id, false, -EINVAL,
+				      "mode_data must be 0 for on-change mode");
+		darr_free_free(selectors);
+		return;
+	}
+	/* PERIODIC requires a non-zero interval in msec. */
+	if (msg->mode == NOTIFY_MODE_PERIODIC && selectors && msg->mode_data == 0) {
+		fe_session_send_error(session, req_id, false, -EINVAL,
+				      "mode_data must be non-zero for periodic mode");
+		darr_free_free(selectors);
+		return;
+	}
+
+	is_periodic = msg->mode == NOTIFY_MODE_PERIODIC;
+	xpaths = is_periodic ? &session->periodic_xpaths : &session->notify_xpaths;
+
+	if (!msg->replace && !selectors) {
+		fe_session_send_error(session, req_id, false, -EINVAL,
+				      "non-replace notify-select requires selectors");
+		darr_free_free(selectors);
+		return;
 	}
 
 	/* Validate all selectors, they need to resolve to actual northbound_nodes */
@@ -1351,31 +1459,43 @@ static void fe_session_handle_notify_select(struct mgmt_fe_session_ctx *session,
 		darr_free(nb_nodes);
 	}
 
+	/*
+	 * Commit mode/mode_data only after all selector validation succeeds.
+	 * Periodic mode keeps a session base tick at the minimum requested
+	 * interval; this allows multiple periodic requests to share one timer.
+	 */
+	if (is_periodic) {
+		/* If replacing or first-time setting selectors, set the periodic interval. */
+		if (msg->replace || !darr_len(session->periodic_xpaths))
+			session->periodic_interval = msg->mode_data;
+		else if (msg->mode_data < session->periodic_interval)
+			session->periodic_interval = msg->mode_data;
+	}
+
 	if (msg->replace) {
-		/* KISS: remove all existing selectors, add back new set */
-		rm_clients = ns_string_remove_session(session->session_id);
-		darr_free_free(session->notify_xpaths);
-		session->notify_xpaths = selectors;
-	} else if (selectors) {
-		/* TODO: would be nice to sort the stored selectors and eliminate dups */
-		new = darr_append_nz(session->notify_xpaths, darr_len(selectors));
-		memcpy(new, selectors, darr_len(selectors) * sizeof(*selectors));
+		/* Replace this mode's selector set with the provided selectors. */
+		if (!is_periodic)
+			rm_clients = ns_string_remove_session(session->session_id);
+		darr_free_free(*xpaths);
+		*xpaths = selectors;
 	} else {
-		_log_err("Invalid msg from session-id: %Lu: no selectors present in non-replace msg",
-			 session->session_id);
-		darr_free_free(selectors);
-		selectors = NULL;
-		goto done;
+		/* TODO: would be nice to sort the stored selectors and eliminate dups */
+		new = darr_append_nz(*xpaths, darr_len(selectors));
+		memcpy(new, selectors, darr_len(selectors) * sizeof(*selectors));
 	}
 
-	if (session->notify_xpaths && DEBUG_MODE_CHECK(&mgmt_debug_fe, DEBUG_MODE_ALL)) {
-		_dbg("Update NOTIFY selectors '%pSAd' (replace: %d) for session-id: %Lu",
-		     session->notify_xpaths, msg->replace, session->session_id);
+	if (*xpaths && DEBUG_MODE_CHECK(&mgmt_debug_fe, DEBUG_MODE_ALL)) {
+		_dbg("Update %s selectors '%pSAd' (replace: %d mode-data: %u) for session-id: %" PRIu64,
+		     is_periodic ? "PERIODIC" : "ON-CHANGE", *xpaths, msg->replace,
+		     session->periodic_interval, session->session_id);
 	}
 
-	ns_string_add_session(req_id, selectors, session->session_id, msg->replace, rm_clients);
-done:
-	if (session->notify_xpaths != selectors)
+	if (!is_periodic)
+		ns_string_add_session(req_id, selectors, session->session_id, msg->replace,
+				      rm_clients);
+	else
+		fe_session_update_periodic_notify_timer(session);
+	if (*xpaths != selectors)
 		darr_free(selectors);
 }
 
@@ -1541,7 +1661,8 @@ static int fe_adapter_send_session_reply(struct mgmt_fe_client_adapter *adapter,
 	msg->code = MGMT_MSG_CODE_SESSION_REPLY;
 	msg->created = created;
 
-	_dbg("Sending session-reply from adapter %s to session-id %Lu req-id %Lu created %u scok %u",
+	_dbg("Sending session-reply from adapter %s to session-id %" PRIu64 " req-id %" PRIu64
+	     " created %u scok %u",
 	     adapter->name, session_id, req_id, created, scok);
 
 	ret = fe_adapter_send_msg(adapter, msg, mgmt_msg_native_get_msg_len(msg), scok);
@@ -1561,7 +1682,8 @@ static void fe_adapter_handle_session_req(struct mgmt_fe_client_adapter *adapter
 	bool scok = adapter->conn->is_short_circuit;
 	uint64_t client_id;
 
-	_dbg("Got session-req is create %u req-id %Lu for refer-id %Lu notify-fmt %u from '%s'",
+	_dbg("Got session-req is create %u req-id %" PRIu64 " for refer-id %" PRIu64
+	     " notify-fmt %u from '%s'",
 	     msg->refer_id == 0, msg->req_id, msg->refer_id, msg->notify_format, adapter->name);
 
 	/*
@@ -1599,7 +1721,7 @@ static void fe_adapter_handle_session_req(struct mgmt_fe_client_adapter *adapter
 	if (msg_len > sizeof(*msg)) {
 		if (!MGMT_MSG_VALIDATE_NUL_TERM(msg, msg_len)) {
 			fe_adapter_conn_send_error(adapter->conn, 0, msg->req_id, scok, EINVAL,
-						   "Corrupt session-req msg from client-id: %Lu",
+						   "Corrupt session-req msg from client-id: %" PRIu64,
 						   client_id);
 			return;
 		}
@@ -1651,8 +1773,8 @@ static void fe_adapter_process_msg(uint8_t version, uint8_t *data, size_t msg_le
 	 */
 
 	if (msg->code == MGMT_MSG_CODE_SESSION_REQ) {
-		_dbg("adapter %s: session-id %Lu received SESSION_REQ message", adapter->name,
-		     msg->refer_id);
+		_dbg("adapter %s: session-id %" PRIu64 " received SESSION_REQ message",
+		     adapter->name, msg->refer_id);
 		fe_adapter_handle_session_req(adapter, msg, msg_len);
 		return;
 	}
@@ -1671,7 +1793,7 @@ static void fe_adapter_process_msg(uint8_t version, uint8_t *data, size_t msg_le
 
 	switch (msg->code) {
 	case MGMT_MSG_CODE_COMMIT:
-		_dbg("adapter %s: session-id %Lu received COMMIT message", adapter->name,
+		_dbg("adapter %s: session-id %" PRIu64 " received COMMIT message", adapter->name,
 		     msg->refer_id);
 		fe_session_handle_commit(session, msg, msg_len);
 		break;
@@ -1681,7 +1803,7 @@ static void fe_adapter_process_msg(uint8_t version, uint8_t *data, size_t msg_le
 		fe_session_handle_edit(session, msg, msg_len);
 		break;
 	case MGMT_MSG_CODE_LOCK:
-		_dbg("adapter %s: session-id %Lu received LOCK message", adapter->name,
+		_dbg("adapter %s: session-id %" PRIu64 " received LOCK message", adapter->name,
 		     msg->refer_id);
 		fe_session_handle_lock(session, msg, msg_len);
 		break;
@@ -1853,7 +1975,8 @@ void mgmt_fe_adapter_send_notify(uint from_id, struct mgmt_msg_notify_data *msg,
 	if (msg->refer_id != MGMTD_SESSION_ID_NONE) {
 		conn = _get_notify_conn(msg->refer_id, &format);
 		if (!conn) {
-			_dbg("No session or client (id: %Lu) exists to send notify 'get' data to: %s",
+			_dbg("No session or client (id: %" PRIu64
+			     ") exists to send notify 'get' data to: %s",
 			     msg->refer_id, notif);
 			return;
 		}
@@ -1867,7 +1990,7 @@ void mgmt_fe_adapter_send_notify(uint from_id, struct mgmt_msg_notify_data *msg,
 	darr_foreach_i (session_ids, i) {
 		conn = _get_notify_conn(session_ids[i], &format);
 		if (!conn) {
-			_log_err("No session or client (id: %Lu) exists to send notify: %s",
+			_log_err("No session or client (id: %" PRIu64 ") exists to send notify: %s",
 				 session_ids[i], notif);
 			continue;
 		}
@@ -2174,5 +2297,5 @@ void mgmt_fe_adapter_destroy(void)
 
 	ns_string_free_all(&mgmt_fe_ns_strings);
 
-	hash_free(mgmt_fe_sessions);
+	hash_clean_and_free(&mgmt_fe_sessions, NULL);
 }

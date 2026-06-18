@@ -282,7 +282,7 @@ static bool gm_sg_filter_match(const struct gm_if *gm_if, const pim_addr source,
 		.grp.ipaddr_v6 = group,
 	};
 
-	if (!pim_filter_match(&pim_interface->gmp_filter, &sg, gm_if->ifp)) {
+	if (!pim_filter_match(&pim_interface->gmp_filter, &sg, gm_if->ifp, gm_if->ifp)) {
 		if (PIM_DEBUG_GM_TRACE)
 			zlog_debug("%s: SG%pPSG on interface %s filtered due to route-map",
 				   __func__, &sg, gm_if->ifp->name);
@@ -691,7 +691,7 @@ static void gm_packet_sg_remove_sources(struct gm_if *gm_ifp,
 
 static void gm_sg_expiry_cancel(struct gm_sg *sg)
 {
-	if (sg->t_sg_expire && PIM_DEBUG_GM_TRACE)
+	if (event_is_scheduled(sg->t_sg_expire) && PIM_DEBUG_GM_TRACE)
 		zlog_debug(log_sg(sg, "alive, cancelling expiry timer"));
 	event_cancel(&sg->t_sg_expire);
 	sg->query_sbit = true;
@@ -1371,7 +1371,7 @@ static void gm_sg_timer_start(struct gm_if *gm_ifp, struct gm_sg *sg,
 	if (PIM_DEBUG_GM_TRACE)
 		zlog_debug(log_sg(sg, "expiring in %pTVI"), &expire_wait);
 
-	if (sg->t_sg_expire) {
+	if (event_is_scheduled(sg->t_sg_expire)) {
 		struct timeval remain;
 
 		remain = event_timer_remain(sg->t_sg_expire);
@@ -1620,7 +1620,7 @@ static void gm_handle_query(struct gm_if *gm_ifp,
 
 	if (len == sizeof(struct mld_v1_pkt)) {
 		timers.qrv = gm_ifp->cur_qrv;
-		timers.max_resp_ms = hdr->max_resp_code;
+		timers.max_resp_ms = ntohs(hdr->max_resp_code);
 		timers.qqic_ms = gm_ifp->cur_query_intv;
 	} else {
 		timers.qrv = (hdr->flags & 0x7) ?: 8;
@@ -1699,7 +1699,7 @@ static void gm_rx_process(struct gm_if *gm_ifp,
 	struct ipv6_ph ph6 = {
 		.src = pkt_src->sin6_addr,
 		.dst = *pkt_dst,
-		.ulpl = htons(pktlen),
+		.ulpl = htonl(pktlen),
 		.next_hdr = IPPROTO_ICMPV6,
 	};
 
@@ -1929,7 +1929,7 @@ static void gm_send_query(struct gm_if *gm_ifp, pim_addr grp,
 	};
 	struct ipv6_ph ph6 = {
 		.src = pim_ifp->ll_lowest,
-		.ulpl = htons(sizeof(query)),
+		.ulpl = htonl(sizeof(query)),
 		.next_hdr = IPPROTO_ICMPV6,
 	};
 	union {
@@ -2387,6 +2387,7 @@ void gm_ifp_teardown(struct interface *ifp)
 
 	gm_group_delete(gm_ifp);
 
+	gm_gsq_pends_fini(gm_ifp->gsq_pends);
 	gm_grp_pends_fini(gm_ifp->grp_pends);
 	gm_packet_expires_fini(gm_ifp->expires);
 	gm_subscribers_fini(gm_ifp->subscribers);
@@ -2485,7 +2486,7 @@ void gm_ifp_update(struct interface *ifp)
 		gm_ifp->cur_max_resp = cfg_max_response;
 
 	/* Only adjust the QRV if no other querier is available */
-	if (gm_ifp->t_other_querier == NULL)
+	if (!event_is_scheduled(gm_ifp->t_other_querier))
 		gm_ifp->cur_qrv = pim_ifp->gm_default_robustness_variable;
 
 	gm_ifp->cur_lmqc = if_gm_last_member_query_count(pim_ifp);

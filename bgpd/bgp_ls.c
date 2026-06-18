@@ -25,39 +25,137 @@
 
 DEFINE_MTYPE_STATIC(BGPD, BGP_LS, "BGP-LS instance");
 
+static int bgp_ls_refresh_bgp_link_endx_attrs(struct bgp *bgp, struct peer *peer);
+static struct bgp_ls_nlri *bgp_ls_lookup_bgp_prefix_nlri(struct bgp *bgp, const struct prefix *p,
+							 enum bgp_ls_bgp_route_type route_type);
+
+void bgp_ls_handle_srv6_localsid_update(struct bgp *bgp, const struct prefix *p, afi_t afi,
+					uint8_t type, unsigned short instance,
+					uint32_t seg6local_action,
+					const struct seg6local_context *seg6local_ctx, bool is_add)
+{
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution)
+		return;
+
+	if (afi != AFI_IP6 || type != ZEBRA_ROUTE_STATIC)
+		return;
+
+	if (!is_add) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("%s: BGP-LS localsid delete %pFX type=%s(%u) instance=%u",
+				   __func__, p, zebra_route_string(type), type, instance);
+
+		bgp_ls_withdraw_static_srv6_sid(bgp, &p->u.prefix6, p->prefixlen);
+		bgp_ls_delete_bgp_link_srv6_endx_sid(bgp, &p->u.prefix6, p->prefixlen);
+		return;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("%s: BGP-LS localsid add %pFX type=%s(%u) instance=%u action=%u ctx=%s",
+			   __func__, p, zebra_route_string(type), type, instance, seg6local_action,
+			   seg6local_ctx ? "set" : "unset");
+
+	if (seg6local_action == ZEBRA_SEG6_LOCAL_ACTION_UNSPEC || !seg6local_ctx)
+		return;
+
+	if (seg6local_action == ZEBRA_SEG6_LOCAL_ACTION_END)
+		bgp_ls_originate_static_srv6_sid_from_seg6local(bgp, &p->u.prefix6, p->prefixlen,
+								seg6local_action, seg6local_ctx);
+	else if (seg6local_action == ZEBRA_SEG6_LOCAL_ACTION_END_X)
+		bgp_ls_upsert_bgp_link_srv6_endx_sid(bgp, &p->u.prefix6, p->prefixlen,
+						     seg6local_action, seg6local_ctx);
+}
+
+/*
+ * BGP-LS Route Handler - Add
+ *
+ * Abstraction layer for route redistribution events. Handles BGP-LS concerns
+ * including SRv6 localsid updates from route add events.
+ */
+int bgp_ls_handle_route_add(struct bgp *bgp, const struct prefix *p, afi_t afi, uint8_t type,
+			    unsigned short instance, uint32_t seg6local_action,
+			    const struct seg6local_context *seg6local_ctx)
+{
+	/* Delegate SRv6 localsid handling to BGP-LS layer */
+	bgp_ls_handle_srv6_localsid_update(bgp, p, afi, type, instance, seg6local_action,
+					   seg6local_ctx, true);
+	return 0;
+}
+
+/*
+ * BGP-LS Route Handler - Delete
+ *
+ * Abstraction layer for route redistribution events. Handles BGP-LS concerns
+ * including SRv6 localsid updates from route delete events.
+ */
+int bgp_ls_handle_route_delete(struct bgp *bgp, const struct prefix *p, afi_t afi, uint8_t type,
+			       unsigned short instance)
+{
+	/* Delegate SRv6 localsid handling to BGP-LS layer */
+	bgp_ls_handle_srv6_localsid_update(bgp, p, afi, type, instance,
+					   ZEBRA_SEG6_LOCAL_ACTION_UNSPEC, NULL, false);
+	return 0;
+}
+
 /*
  * Helper Functions for NLRI Formatting
  */
 
 /* Convert node descriptor to JSON */
-static json_object *node_desc_to_json(struct bgp_ls_node_descriptor *node)
+static json_object *node_desc_to_json(struct bgp_ls_node_descriptor *node,
+				      enum bgp_ls_protocol_id protocol_id)
 {
 	json_object *json_node = json_object_new_object();
 
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_AS_BIT))
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_AS_BIT))
 		json_object_int_add(json_node, "asn", node->asn);
 
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_BGP_LS_ID_BIT))
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_BGP_LS_ID_BIT))
 		json_object_int_add(json_node, "bgplsId", node->bgp_ls_id);
 
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_OSPF_AREA_BIT))
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_OSPF_AREA_BIT))
 		json_object_string_addf(json_node, "ospfAreaId", "%pI4",
 					(in_addr_t *)&node->ospf_area_id);
 
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_IGP_ROUTER_BIT)) {
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_IGP_ROUTER_BIT)) {
 		char igp_router_id[256];
-		char *p = igp_router_id;
 
-		for (int i = 0; i < node->igp_router_id_len; i++) {
-			p += snprintfrr(p, sizeof(igp_router_id) - (p - igp_router_id), "%02x",
-					node->igp_router_id[i]);
-			if (i < node->igp_router_id_len - 1 && (i + 1) % 2 == 0) {
-				p += snprintfrr(p, sizeof(igp_router_id) - (p - igp_router_id),
-						".");
-			}
+		if (bgp_ls_protocol_is_isis(protocol_id) &&
+		    node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_ISIS_LEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pSY.00",
+				   node->igp_router_id.raw);
+		else if (bgp_ls_protocol_is_isis(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_ISIS_PSEUDO_LEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pPN",
+				   node->igp_router_id.raw);
+		else if (bgp_ls_protocol_is_ospf(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_OSPF_LEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pI4",
+				   &node->igp_router_id.ospf);
+		else if (bgp_ls_protocol_is_ospf(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_OSPF_PSEUDO_LEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pI4:%pI4",
+				   &node->igp_router_id.pseudo_ospf.router_id,
+				   &node->igp_router_id.pseudo_ospf.ifaddr);
+		else if (bgp_ls_protocol_is_direct_static(protocol_id) &&
+			 node->igp_router_id_len == IPV4_MAX_BYTELEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pI4",
+				   &node->igp_router_id.ipv4);
+		else if (bgp_ls_protocol_is_direct_static(protocol_id) &&
+			 node->igp_router_id_len == IPV6_MAX_BYTELEN)
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "%pI6",
+				   &node->igp_router_id.ipv6);
+		else {
+			flog_err(EC_BGP_LS_PACKET,
+				 "BGP-LS: unhandled IGP Router-ID len %u for protocol %u",
+				 node->igp_router_id_len, protocol_id);
+			snprintfrr(igp_router_id, sizeof(igp_router_id), "<unknown>");
 		}
 		json_object_string_add(json_node, "igpRouterId", igp_router_id);
 	}
+
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT))
+		json_object_string_addf(json_node, "bgpRouterId", "%pI4", &node->bgp_router_id);
 
 	return json_node;
 }
@@ -67,30 +165,29 @@ static json_object *link_desc_to_json(struct bgp_ls_link_descriptor *link_desc)
 {
 	json_object *json_link = json_object_new_object();
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT)) {
 		json_object_int_add(json_link, "linkLocalId", link_desc->link_local_id);
 		json_object_int_add(json_link, "linkRemoteId", link_desc->link_remote_id);
 	}
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_INTF_BIT))
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_INTF_BIT))
 		json_object_string_addf(json_link, "ipv4InterfaceAddress", "%pI4",
 					&link_desc->ipv4_intf_addr);
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_NEIGH_BIT))
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_NEIGH_BIT))
 		json_object_string_addf(json_link, "ipv4NeighborAddress", "%pI4",
 					&link_desc->ipv4_neigh_addr);
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_INTF_BIT))
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_INTF_BIT))
 		json_object_string_addf(json_link, "ipv6InterfaceAddress", "%pI6",
 					&link_desc->ipv6_intf_addr);
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_NEIGH_BIT))
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_NEIGH_BIT))
 		json_object_string_addf(json_link, "ipv6NeighborAddress", "%pI6",
 					&link_desc->ipv6_neigh_addr);
 
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_MT_ID_BIT) &&
-	    link_desc->mt_id_count > 0)
-		json_object_int_add(json_link, "mtId", link_desc->mt_id[0]);
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_MT_ID_BIT))
+		json_object_int_add(json_link, "multiTopologyId", link_desc->mt_id);
 
 	return json_link;
 }
@@ -106,10 +203,19 @@ static json_object *prefix_desc_to_json(struct bgp_ls_prefix_descriptor *prefix_
 				&prefix_desc->prefix);
 
 	/* OSPF Route Type */
-	if (BGP_LS_TLV_CHECK(prefix_desc->present_tlvs, BGP_LS_PREFIX_DESC_OSPF_ROUTE_BIT))
+	if (CHECK_FLAG(prefix_desc->present_tlvs, BGP_LS_PREFIX_DESC_OSPF_ROUTE_BIT))
 		json_object_string_addf(json_prefix, "ospfRouteType", "%s",
 					bgp_ls_ospf_route_type_str_json(
 						prefix_desc->ospf_route_type));
+
+	/* BGP Route Type */
+	if (CHECK_FLAG(prefix_desc->present_tlvs, BGP_LS_PREFIX_DESC_BGP_ROUTE_TYPE_BIT))
+		json_object_string_addf(json_prefix, "bgpRouteType", "%s",
+					bgp_ls_bgp_route_type_str_json(prefix_desc->bgp_route_type));
+
+	/* Multi-Topology ID */
+	if (CHECK_FLAG(prefix_desc->present_tlvs, BGP_LS_PREFIX_DESC_MT_ID_BIT))
+		json_object_int_add(json_prefix, "multiTopologyId", prefix_desc->mt_id);
 
 	return json_prefix;
 }
@@ -144,6 +250,11 @@ json_object *bgp_ls_nlri_to_json(struct bgp_ls_nlri *nlri)
 		protocol_id = nlri->nlri_data.prefix.protocol_id;
 		identifier = nlri->nlri_data.prefix.identifier;
 		break;
+	case BGP_LS_NLRI_TYPE_SRV6_SID:
+		nlri_type_str = "srv6Sid";
+		protocol_id = nlri->nlri_data.srv6_sid.protocol_id;
+		identifier = nlri->nlri_data.srv6_sid.identifier;
+		break;
 	case BGP_LS_NLRI_TYPE_RESERVED:
 		nlri_type_str = "unknown";
 		break;
@@ -158,12 +269,15 @@ json_object *bgp_ls_nlri_to_json(struct bgp_ls_nlri *nlri)
 
 	/* Type-specific descriptors */
 	if (nlri->nlri_type == BGP_LS_NLRI_TYPE_NODE) {
-		json_object *json_local = node_desc_to_json(&nlri->nlri_data.node.local_node);
+		json_object *json_local = node_desc_to_json(&nlri->nlri_data.node.local_node,
+							    protocol_id);
 
 		json_object_object_add(json_nlri, "localNodeDescriptors", json_local);
 	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_LINK) {
-		json_object *json_local = node_desc_to_json(&nlri->nlri_data.link.local_node);
-		json_object *json_remote = node_desc_to_json(&nlri->nlri_data.link.remote_node);
+		json_object *json_local = node_desc_to_json(&nlri->nlri_data.link.local_node,
+							    protocol_id);
+		json_object *json_remote = node_desc_to_json(&nlri->nlri_data.link.remote_node,
+							     protocol_id);
 		json_object *json_link = link_desc_to_json(&nlri->nlri_data.link.link_desc);
 
 		json_object_object_add(json_nlri, "localNodeDescriptors", json_local);
@@ -171,11 +285,28 @@ json_object *bgp_ls_nlri_to_json(struct bgp_ls_nlri *nlri)
 		json_object_object_add(json_nlri, "linkDescriptors", json_link);
 	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_IPV4_PREFIX ||
 		   nlri->nlri_type == BGP_LS_NLRI_TYPE_IPV6_PREFIX) {
-		json_object *json_local = node_desc_to_json(&nlri->nlri_data.prefix.local_node);
+		json_object *json_local = node_desc_to_json(&nlri->nlri_data.prefix.local_node,
+							    protocol_id);
 		json_object *json_prefix = prefix_desc_to_json(&nlri->nlri_data.prefix.prefix_desc,
 							       nlri->nlri_type);
 		json_object_object_add(json_nlri, "localNodeDescriptors", json_local);
 		json_object_object_add(json_nlri, "prefixDescriptors", json_prefix);
+	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_SRV6_SID) {
+		struct bgp_ls_srv6_sid_nlri *srv6 = &nlri->nlri_data.srv6_sid;
+		json_object *json_local = node_desc_to_json(&srv6->local_node, protocol_id);
+		json_object *json_sid = json_object_new_object();
+
+		if (CHECK_FLAG(srv6->sid_desc.present_tlvs, BGP_LS_SRV6_SID_DESC_MT_ID_BIT)) {
+			json_object *json_mt = json_object_new_array();
+
+			json_object_array_add(json_mt, json_object_new_int(srv6->sid_desc.mt_id));
+			json_object_object_add(json_sid, "multiTopologyId", json_mt);
+		}
+
+		json_object_string_addf(json_sid, "srv6SidValue", "%pI6", &srv6->sid_desc.sid);
+
+		json_object_object_add(json_nlri, "localNodeDescriptors", json_local);
+		json_object_object_add(json_nlri, "srv6SidDescriptors", json_sid);
 	}
 
 	return json_nlri;
@@ -183,7 +314,7 @@ json_object *bgp_ls_nlri_to_json(struct bgp_ls_nlri *nlri)
 
 /* Format node descriptor to string */
 static void format_node_desc(char **p, size_t *remain, struct bgp_ls_node_descriptor *node,
-			     const char *prefix_str)
+			     enum bgp_ls_protocol_id protocol_id, const char *prefix_str)
 {
 	int len;
 
@@ -192,14 +323,14 @@ static void format_node_desc(char **p, size_t *remain, struct bgp_ls_node_descri
 	*remain -= len;
 
 	/* AS Number */
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_AS_BIT)) {
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_AS_BIT)) {
 		len = snprintfrr(*p, *remain, "[c%u]", node->asn);
 		*p += len;
 		*remain -= len;
 	}
 
 	/* BGP-LS Identifier (deprecated but still used) */
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_BGP_LS_ID_BIT)) {
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_BGP_LS_ID_BIT)) {
 		len = snprintfrr(*p, *remain, "[b%u.%u.%u.%u]", (node->bgp_ls_id >> 24) & 0xFF,
 				 (node->bgp_ls_id >> 16) & 0xFF, (node->bgp_ls_id >> 8) & 0xFF,
 				 node->bgp_ls_id & 0xFF);
@@ -208,26 +339,66 @@ static void format_node_desc(char **p, size_t *remain, struct bgp_ls_node_descri
 	}
 
 	/* IGP Router ID */
-	if (BGP_LS_TLV_CHECK(node->present_tlvs, BGP_LS_NODE_DESC_IGP_ROUTER_BIT)) {
-		len = snprintfrr(*p, *remain, "[s");
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_IGP_ROUTER_BIT)) {
+		if (bgp_ls_protocol_is_isis(protocol_id) &&
+		    node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_ISIS_LEN)
+			len = snprintfrr(*p, *remain, "[s%pSY.00]", node->igp_router_id.raw);
+		else if (bgp_ls_protocol_is_isis(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_ISIS_PSEUDO_LEN)
+			len = snprintfrr(*p, *remain, "[s%pPN]", node->igp_router_id.raw);
+		else if (bgp_ls_protocol_is_ospf(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_OSPF_LEN)
+			len = snprintfrr(*p, *remain, "[r%pI4]", &node->igp_router_id.ospf);
+		else if (bgp_ls_protocol_is_ospf(protocol_id) &&
+			 node->igp_router_id_len == BGP_LS_IGP_ROUTER_ID_OSPF_PSEUDO_LEN)
+			len = snprintfrr(*p, *remain, "[r%pI4:%pI4]",
+					 &node->igp_router_id.pseudo_ospf.router_id,
+					 &node->igp_router_id.pseudo_ospf.ifaddr);
+		else if (bgp_ls_protocol_is_direct_static(protocol_id) &&
+			 node->igp_router_id_len == IPV4_MAX_BYTELEN)
+			len = snprintfrr(*p, *remain, "[r%pI4]", &node->igp_router_id.ipv4);
+		else if (bgp_ls_protocol_is_direct_static(protocol_id) &&
+			 node->igp_router_id_len == IPV6_MAX_BYTELEN)
+			len = snprintfrr(*p, *remain, "[r%pI6]", &node->igp_router_id.ipv6);
+		else {
+			flog_err(EC_BGP_LS_PACKET,
+				 "BGP-LS: unhandled IGP Router-ID len %u for protocol %u",
+				 node->igp_router_id_len, protocol_id);
+			len = snprintfrr(*p, *remain, "[s<unknown>]");
+		}
 		*p += len;
 		*remain -= len;
-		for (int i = 0; i < node->igp_router_id_len; i++) {
-			len = snprintfrr(*p, *remain, "%02x", node->igp_router_id[i]);
-			*p += len;
-			*remain -= len;
-			if (i < node->igp_router_id_len - 1 && (i + 1) % 2 == 0) {
-				len = snprintfrr(*p, *remain, ".");
-				*p += len;
-				*remain -= len;
-			}
-		}
-		len = snprintfrr(*p, *remain, "]");
+	}
+
+	/* BGP Router ID (TLV 516) */
+	if (CHECK_FLAG(node->present_tlvs, BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT)) {
+		len = snprintfrr(*p, *remain, "[q%pI4]", &node->bgp_router_id);
 		*p += len;
 		*remain -= len;
 	}
 
 	len = snprintfrr(*p, *remain, "]");
+	*p += len;
+	*remain -= len;
+}
+
+/* Format SRv6 SID descriptor to string */
+static void format_srv6_sid_desc(char **p, size_t *remain,
+				 struct bgp_ls_srv6_sid_descriptor *sid_desc)
+{
+	int len;
+
+	len = snprintfrr(*p, *remain, "[S");
+	*p += len;
+	*remain -= len;
+
+	if (CHECK_FLAG(sid_desc->present_tlvs, BGP_LS_SRV6_SID_DESC_MT_ID_BIT)) {
+		len = snprintfrr(*p, *remain, "[t0x%04x]", sid_desc->mt_id);
+		*p += len;
+		*remain -= len;
+	}
+
+	len = snprintfrr(*p, *remain, "[sd%pI6]]", &sid_desc->sid);
 	*p += len;
 	*remain -= len;
 }
@@ -242,7 +413,7 @@ static void format_link_desc(char **p, size_t *remain, struct bgp_ls_link_descri
 	*remain -= len;
 
 	/* Link Local/Remote Identifiers (TLV 258) */
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT)) {
 		len = snprintfrr(*p, *remain, "[l%u/%u]", link_desc->link_local_id,
 				 link_desc->link_remote_id);
 		*p += len;
@@ -250,29 +421,36 @@ static void format_link_desc(char **p, size_t *remain, struct bgp_ls_link_descri
 	}
 
 	/* IPv4 Interface Address (TLV 259) */
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_INTF_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_INTF_BIT)) {
 		len = snprintfrr(*p, *remain, "[i%pI4]", &link_desc->ipv4_intf_addr);
 		*p += len;
 		*remain -= len;
 	}
 
 	/* IPv4 Neighbor Address (TLV 260) */
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_NEIGH_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV4_NEIGH_BIT)) {
 		len = snprintfrr(*p, *remain, "[n%pI4]", &link_desc->ipv4_neigh_addr);
 		*p += len;
 		*remain -= len;
 	}
 
 	/* IPv6 Interface Address (TLV 261) */
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_INTF_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_INTF_BIT)) {
 		len = snprintfrr(*p, *remain, "[i%pI6]", &link_desc->ipv6_intf_addr);
 		*p += len;
 		*remain -= len;
 	}
 
 	/* IPv6 Neighbor Address (TLV 262) */
-	if (BGP_LS_TLV_CHECK(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_NEIGH_BIT)) {
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_IPV6_NEIGH_BIT)) {
 		len = snprintfrr(*p, *remain, "[n%pI6]", &link_desc->ipv6_neigh_addr);
+		*p += len;
+		*remain -= len;
+	}
+
+	/* Multi-Topology ID (TLV 263) */
+	if (CHECK_FLAG(link_desc->present_tlvs, BGP_LS_LINK_DESC_MT_ID_BIT)) {
+		len = snprintfrr(*p, *remain, "[t0x%04x]", link_desc->mt_id);
 		*p += len;
 		*remain -= len;
 	}
@@ -307,6 +485,9 @@ void bgp_ls_nlri_format(struct bgp_ls_nlri *nlri, char *buf, size_t buf_len)
 	case BGP_LS_NLRI_TYPE_IPV6_PREFIX:
 		len = snprintfrr(p, remain, "[T]");
 		break;
+	case BGP_LS_NLRI_TYPE_SRV6_SID:
+		len = snprintfrr(p, remain, "[S]");
+		break;
 	default:
 		len = snprintfrr(p, remain, "[U]");
 		break;
@@ -329,6 +510,9 @@ void bgp_ls_nlri_format(struct bgp_ls_nlri *nlri, char *buf, size_t buf_len)
 		   nlri->nlri_type == BGP_LS_NLRI_TYPE_IPV6_PREFIX) {
 		protocol_id = nlri->nlri_data.prefix.protocol_id;
 		instance_id = nlri->nlri_data.prefix.identifier;
+	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_SRV6_SID) {
+		protocol_id = nlri->nlri_data.srv6_sid.protocol_id;
+		instance_id = nlri->nlri_data.srv6_sid.identifier;
 	}
 
 	switch (protocol_id) {
@@ -348,7 +532,7 @@ void bgp_ls_nlri_format(struct bgp_ls_nlri *nlri, char *buf, size_t buf_len)
 		proto_str = "D";
 		break;
 	case BGP_LS_PROTO_STATIC:
-		proto_str = "S";
+		proto_str = "ST";
 		break;
 	case BGP_LS_PROTO_BGP:
 		proto_str = "B";
@@ -363,17 +547,29 @@ void bgp_ls_nlri_format(struct bgp_ls_nlri *nlri, char *buf, size_t buf_len)
 
 	/* Add NLRI type-specific descriptors */
 	if (nlri->nlri_type == BGP_LS_NLRI_TYPE_NODE) {
-		format_node_desc(&p, &remain, &nlri->nlri_data.node.local_node, "N");
+		format_node_desc(&p, &remain, &nlri->nlri_data.node.local_node, protocol_id, "N");
 	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_LINK) {
-		format_node_desc(&p, &remain, &nlri->nlri_data.link.local_node, "N");
-		format_node_desc(&p, &remain, &nlri->nlri_data.link.remote_node, "R");
+		format_node_desc(&p, &remain, &nlri->nlri_data.link.local_node, protocol_id, "N");
+		format_node_desc(&p, &remain, &nlri->nlri_data.link.remote_node, protocol_id, "R");
 		format_link_desc(&p, &remain, &nlri->nlri_data.link.link_desc);
 	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_IPV4_PREFIX ||
 		   nlri->nlri_type == BGP_LS_NLRI_TYPE_IPV6_PREFIX) {
-		format_node_desc(&p, &remain, &nlri->nlri_data.prefix.local_node, "N");
+		format_node_desc(&p, &remain, &nlri->nlri_data.prefix.local_node, protocol_id, "N");
 
 		/* Format prefix */
-		len = snprintfrr(p, remain, "[P[p");
+		len = snprintfrr(p, remain, "[P");
+		p += len;
+		remain -= len;
+
+		if (CHECK_FLAG(nlri->nlri_data.prefix.prefix_desc.present_tlvs,
+			       BGP_LS_PREFIX_DESC_MT_ID_BIT)) {
+			len = snprintfrr(p, remain, "[t0x%04x]",
+					 nlri->nlri_data.prefix.prefix_desc.mt_id);
+			p += len;
+			remain -= len;
+		}
+
+		len = snprintfrr(p, remain, "[p");
 		p += len;
 		remain -= len;
 
@@ -392,6 +588,20 @@ void bgp_ls_nlri_format(struct bgp_ls_nlri *nlri, char *buf, size_t buf_len)
 		len = snprintfrr(p, remain, "]]");
 		p += len;
 		remain -= len;
+
+		/* Format BGP Route Type if present */
+		if (CHECK_FLAG(nlri->nlri_data.prefix.prefix_desc.present_tlvs,
+			       BGP_LS_PREFIX_DESC_BGP_ROUTE_TYPE_BIT)) {
+			len = snprintfrr(p, remain, "[br0x%02x]",
+					 nlri->nlri_data.prefix.prefix_desc.bgp_route_type);
+			p += len;
+			remain -= len;
+		}
+	} else if (nlri->nlri_type == BGP_LS_NLRI_TYPE_SRV6_SID) {
+		/* Format local node descriptor */
+		format_node_desc(&p, &remain, &nlri->nlri_data.srv6_sid.local_node, protocol_id,
+				 "N");
+		format_srv6_sid_desc(&p, &remain, &nlri->nlri_data.srv6_sid.sid_desc);
 	}
 }
 
@@ -493,7 +703,7 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 	/* Make default attribute. */
 	bgp_attr_default_set(&attr, bgp, BGP_ORIGIN_INCOMPLETE);
 
-	attr.ls_attr = ls_attr;
+	bgp_attr_set_ls_attr(&attr, ls_attr);
 
 	attr_new = bgp_attr_intern(&attr);
 
@@ -804,6 +1014,28 @@ bool bgp_ls_is_registered(struct bgp *bgp)
 
 /*
  * ===========================================================================
+ * Static END.X SID list management
+ * ===========================================================================
+ */
+
+struct bgp_ls_static_endx_sid {
+	struct in6_addr sid;
+	uint8_t prefixlen;
+	uint16_t behavior;
+	uint8_t lb_len;
+	uint8_t ln_len;
+	uint8_t fn_len;
+	uint8_t arg_len;
+	struct in6_addr nh6;
+	ifindex_t ifindex;
+	struct peer *peer;
+	struct bgp_ls_endx_sid_list_item list_item;
+};
+
+DECLARE_DLIST(bgp_ls_endx_sid_list, struct bgp_ls_static_endx_sid, list_item);
+
+/*
+ * ===========================================================================
  * Module Initialization and Cleanup
  * ===========================================================================
  */
@@ -825,6 +1057,8 @@ void bgp_ls_init(struct bgp *bgp)
 
 	bgp->ls_info->ted = ls_ted_new(bgp->as, "BGP-LS TED", bgp->as);
 
+	bgp_ls_endx_sid_list_init(&bgp->ls_info->static_endx_sids);
+
 	zlog_info("BGP-LS: Module initialized for instance %s", bgp->name_pretty);
 }
 
@@ -836,6 +1070,7 @@ void bgp_ls_cleanup(struct bgp *bgp)
 {
 	struct bgp_ls_nlri *entry;
 	struct bgp_ls_attr *ls_attr;
+	struct bgp_ls_static_endx_sid *endx_entry;
 
 	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT)
 		return;
@@ -859,9 +1094,1252 @@ void bgp_ls_cleanup(struct bgp *bgp)
 
 	ls_ted_del_all(&bgp->ls_info->ted);
 
+	frr_each_safe (bgp_ls_endx_sid_list, &bgp->ls_info->static_endx_sids, endx_entry) {
+		bgp_ls_endx_sid_list_del(&bgp->ls_info->static_endx_sids, endx_entry);
+		XFREE(MTYPE_BGP_LS, endx_entry);
+	}
+
+	bgp_ls_endx_sid_list_fini(&bgp->ls_info->static_endx_sids);
+
 	idalloc_destroy(bgp->ls_info->allocator);
 
 	XFREE(MTYPE_BGP_LS, bgp->ls_info);
 
 	zlog_info("BGP-LS: Module terminated for instance %s", bgp->name_pretty);
+}
+
+static bool bgp_ls_has_srv6_capability(const struct bgp *bgp)
+{
+	if (!bgp || !bgp->ls_info)
+		return false;
+
+	return bgp->ls_info->srv6_locator_nlri_count > 0;
+}
+
+static struct bgp_ls_static_endx_sid *
+bgp_ls_static_endx_sid_lookup(struct bgp *bgp, const struct in6_addr *sid, uint8_t prefixlen)
+{
+	struct bgp_ls_static_endx_sid *entry;
+
+	if (!bgp || !bgp->ls_info || !sid)
+		return NULL;
+
+	frr_each (bgp_ls_endx_sid_list, &bgp->ls_info->static_endx_sids, entry) {
+		if (entry->prefixlen == prefixlen && memcmp(&entry->sid, sid, sizeof(*sid)) == 0)
+			return entry;
+	}
+
+	return NULL;
+}
+
+static uint16_t bgp_ls_seg6local_endx_behavior(uint32_t action, const struct seg6local_context *ctx)
+{
+	bool next_csid;
+	bool psp;
+	bool usd;
+
+	if (action != ZEBRA_SEG6_LOCAL_ACTION_END_X)
+		return SRV6_ENDPOINT_BEHAVIOR_RESERVED;
+
+	next_csid = (ctx && seg6local_has_next_csid(ctx));
+	psp = (ctx && CHECK_SRV6_FLV_OP(ctx->flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_PSP));
+	usd = (ctx && CHECK_SRV6_FLV_OP(ctx->flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USD));
+
+	if (next_csid) {
+		if (psp && usd)
+			return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP_USD;
+		if (psp)
+			return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP;
+		return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID;
+	}
+
+	if (psp && usd)
+		return SRV6_ENDPOINT_BEHAVIOR_END_X_PSP_USD;
+	if (psp)
+		return SRV6_ENDPOINT_BEHAVIOR_END_X_PSP;
+	return SRV6_ENDPOINT_BEHAVIOR_END_X;
+}
+
+static uint16_t bgp_ls_seg6local_to_srv6_behavior(uint32_t action,
+						  const struct seg6local_context *ctx)
+{
+	bool next_csid = (ctx && seg6local_has_next_csid(ctx));
+	bool psp = (ctx && CHECK_SRV6_FLV_OP(ctx->flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_PSP));
+	bool usd = (ctx && CHECK_SRV6_FLV_OP(ctx->flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USD));
+
+	switch (action) {
+	case ZEBRA_SEG6_LOCAL_ACTION_END:
+		if (next_csid) {
+			if (psp && usd)
+				return SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID_PSP_USD;
+			if (psp)
+				return SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID_PSP;
+			return SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID;
+		}
+		if (psp && usd)
+			return SRV6_ENDPOINT_BEHAVIOR_END_PSP_USD;
+		if (psp)
+			return SRV6_ENDPOINT_BEHAVIOR_END_PSP;
+		return SRV6_ENDPOINT_BEHAVIOR_END;
+	case ZEBRA_SEG6_LOCAL_ACTION_END_X:
+		if (next_csid) {
+			if (psp && usd)
+				return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP_USD;
+			if (psp)
+				return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP;
+			return SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID;
+		}
+		if (psp && usd)
+			return SRV6_ENDPOINT_BEHAVIOR_END_X_PSP_USD;
+		if (psp)
+			return SRV6_ENDPOINT_BEHAVIOR_END_X_PSP;
+		return SRV6_ENDPOINT_BEHAVIOR_END_X;
+	default:
+		return SRV6_ENDPOINT_BEHAVIOR_RESERVED;
+	}
+}
+
+static bool bgp_ls_static_srv6_behavior_allowed(uint16_t behavior)
+{
+	switch (behavior) {
+	case SRV6_ENDPOINT_BEHAVIOR_END:
+	case SRV6_ENDPOINT_BEHAVIOR_END_PSP:
+	case SRV6_ENDPOINT_BEHAVIOR_END_PSP_USD:
+	case SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID:
+	case SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID_PSP:
+	case SRV6_ENDPOINT_BEHAVIOR_END_NEXT_CSID_PSP_USD:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X_PSP:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X_PSP_USD:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP:
+	case SRV6_ENDPOINT_BEHAVIOR_END_X_NEXT_CSID_PSP_USD:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int bgp_ls_originate_static_srv6_sid(struct bgp *bgp, const struct in6_addr *sid,
+					    uint8_t prefixlen, uint16_t behavior, uint8_t lb_len,
+					    uint8_t ln_len, uint8_t fn_len, uint8_t arg_len)
+{
+	struct bgp_ls_nlri nlri;
+	struct bgp_ls_attr *ls_attr;
+	int ret;
+
+	if (!bgp || !sid)
+		return -1;
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: originate_static_srv6_sid %pI6/%u behavior=0x%04x lb=%u ln=%u fn=%u arg=%u",
+			   sid, prefixlen, behavior, lb_len, ln_len, fn_len, arg_len);
+
+	if (!bgp_ls_static_srv6_behavior_allowed(behavior)) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: behavior 0x%04x NOT in allowed list - skipping %pI6/%u",
+				   behavior, sid, prefixlen);
+		return 0;
+	}
+
+	memset(&nlri, 0, sizeof(nlri));
+	nlri.nlri_type = BGP_LS_NLRI_TYPE_SRV6_SID;
+	nlri.nlri_data.srv6_sid.protocol_id = BGP_LS_PROTO_STATIC;
+	nlri.nlri_data.srv6_sid.identifier = bgp->ls_info->instance_id;
+
+	nlri.nlri_data.srv6_sid.local_node.bgp_router_id = bgp->router_id;
+	SET_FLAG(nlri.nlri_data.srv6_sid.local_node.present_tlvs,
+		 BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	IPV6_ADDR_COPY(&nlri.nlri_data.srv6_sid.sid_desc.sid, sid);
+
+	ls_attr = bgp_ls_attr_alloc();
+	ls_attr->srv6_endpoint_behavior = behavior;
+	ls_attr->srv6_endpoint_flags = 0;
+	ls_attr->srv6_endpoint_algo = 0;
+	SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_SRV6_ENDPOINT_BEHAVIOR_BIT);
+
+	if (lb_len || ln_len || fn_len || arg_len) {
+		ls_attr->srv6_sid_structure.lb_len = lb_len;
+		ls_attr->srv6_sid_structure.ln_len = ln_len;
+		ls_attr->srv6_sid_structure.fun_len = fn_len;
+		ls_attr->srv6_sid_structure.arg_len = arg_len;
+		SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_SRV6_SID_STRUCTURE_BIT);
+	}
+
+	ret = bgp_ls_update(bgp, &nlri, ls_attr);
+	bgp_ls_attr_free(ls_attr);
+	if (ret < 0) {
+		flog_err(EC_BGP_LS_PACKET, "BGP-LS: Failed to originate static SRv6 SID NLRI");
+		return -1;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Originated static SRv6 SID NLRI %pI6/%u behavior 0x%04x", sid,
+			   prefixlen, behavior);
+
+	return 0;
+}
+
+int bgp_ls_originate_static_srv6_sid_from_seg6local(struct bgp *bgp, const struct in6_addr *sid,
+						    uint8_t prefixlen, uint32_t action,
+						    const struct seg6local_context *ctx)
+{
+	uint16_t behavior;
+	uint8_t lb_len = 0;
+	uint8_t ln_len = 0;
+	uint8_t fn_len = 0;
+	uint8_t arg_len = 0;
+
+	if (!bgp || !sid)
+		return -1;
+
+	behavior = bgp_ls_seg6local_to_srv6_behavior(action, ctx);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: _from_seg6local %pI6/%u action=%u -> behavior=0x%04x", sid,
+			   prefixlen, action, behavior);
+
+	if (behavior == SRV6_ENDPOINT_BEHAVIOR_RESERVED) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: %pI6/%u action=%u mapped to RESERVED - skipping", sid,
+				   prefixlen, action);
+		return 0;
+	}
+
+	if (ctx) {
+		lb_len = ctx->block_len;
+		ln_len = ctx->node_len;
+		fn_len = ctx->function_len;
+		arg_len = ctx->argument_len;
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: %pI6/%u SID structure lb=%u ln=%u fn=%u arg=%u", sid,
+				   prefixlen, lb_len, ln_len, fn_len, arg_len);
+	}
+
+	return bgp_ls_originate_static_srv6_sid(bgp, sid, prefixlen, behavior, lb_len, ln_len,
+						fn_len, arg_len);
+}
+
+int bgp_ls_withdraw_static_srv6_sid(struct bgp *bgp, const struct in6_addr *sid, uint8_t prefixlen)
+{
+	struct bgp_ls_nlri nlri;
+	int ret;
+
+	if (!bgp || !sid)
+		return -1;
+
+	memset(&nlri, 0, sizeof(nlri));
+	nlri.nlri_type = BGP_LS_NLRI_TYPE_SRV6_SID;
+	nlri.nlri_data.srv6_sid.protocol_id = BGP_LS_PROTO_STATIC;
+	nlri.nlri_data.srv6_sid.identifier = bgp->ls_info->instance_id;
+
+	nlri.nlri_data.srv6_sid.local_node.bgp_router_id = bgp->router_id;
+	SET_FLAG(nlri.nlri_data.srv6_sid.local_node.present_tlvs,
+		 BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	IPV6_ADDR_COPY(&nlri.nlri_data.srv6_sid.sid_desc.sid, sid);
+
+	ret = bgp_ls_withdraw(bgp, &nlri);
+	if (ret < 0) {
+		flog_err(EC_BGP_LS_PACKET, "BGP-LS: Failed to withdraw static SRv6 SID NLRI");
+		return -1;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Withdrawn static SRv6 SID NLRI %pI6/%u", sid, prefixlen);
+
+	return 0;
+}
+
+/*
+ * ===========================================================================
+ * BGP Topology Export (BGP-only fabrics)
+ * ===========================================================================
+ */
+
+/*
+ * Originate Node NLRI for local BGP router
+ *
+ * Reference: draft-ietf-idr-bgp-ls-bgp-only-fabric-04 Section 4.1
+ *
+ * Generates a Node NLRI for the local BGP router with:
+ * - Protocol-ID = BGP_LS_PROTO_BGP (7)
+ * - Autonomous System Number (TLV 512) - local BGP ASN
+ * - BGP Router-ID (TLV 516) - local BGP Identifier
+ */
+int bgp_ls_originate_bgp_node(struct bgp *bgp)
+{
+	struct bgp_ls_nlri *nlri;
+	struct bgp_ls_attr *ls_attr;
+	int ret;
+
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution)
+		return 0;
+
+	nlri = bgp_ls_nlri_alloc();
+
+	/* Set NLRI type and protocol */
+	nlri->nlri_type = BGP_LS_NLRI_TYPE_NODE;
+	nlri->nlri_data.node.protocol_id = BGP_LS_PROTO_BGP;
+	nlri->nlri_data.node.identifier = bgp->ls_info->instance_id;
+
+	/* Local Node Descriptor */
+	/* TLV 512: Autonomous System Number */
+	nlri->nlri_data.node.local_node.asn = bgp->as;
+	SET_FLAG(nlri->nlri_data.node.local_node.present_tlvs, BGP_LS_NODE_DESC_AS_BIT);
+
+	/* TLV 516: BGP Router-ID */
+	nlri->nlri_data.node.local_node.bgp_router_id = bgp->router_id;
+	SET_FLAG(nlri->nlri_data.node.local_node.present_tlvs, BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	/* Node Attributes */
+	ls_attr = bgp_ls_attr_alloc();
+
+	/* TLV 1026: Node Name */
+	if (bgp->peer_self->hostname) {
+		ls_attr->node_name = XSTRDUP(MTYPE_BGP_LS_ATTR, bgp->peer_self->hostname);
+		SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_NODE_NAME_BIT);
+	}
+
+	if (bgp_ls_has_srv6_capability(bgp)) {
+		ls_attr->srv6_cap_flags = 0;
+		SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_SRV6_CAPABILITIES_BIT);
+	}
+
+	ret = bgp_ls_update(bgp, nlri, ls_attr);
+	if (ret != 0) {
+		zlog_err("BGP-LS: Failed to originate BGP Node NLRI");
+		bgp_ls_attr_free(ls_attr);
+		bgp_ls_nlri_free(nlri);
+		return -1;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Originated BGP Node NLRI for AS %u, Router-ID %pI4", bgp->as,
+			   &bgp->router_id);
+
+	bgp_ls_attr_free(ls_attr);
+	bgp_ls_nlri_free(nlri);
+	return 0;
+}
+
+static struct interface *bgp_ls_get_ifp_from_connection(struct peer_connection *connection)
+{
+	struct peer *peer = connection->peer;
+	struct interface *ifp = NULL;
+
+	if (connection->su_local) {
+		if (connection->su_local->sa.sa_family == AF_INET) {
+			ifp = if_lookup_by_ipv4_exact(&connection->su_local->sin.sin_addr,
+						      peer->bgp->vrf_id);
+		} else if (connection->su_local->sa.sa_family == AF_INET6) {
+			ifp = if_lookup_by_ipv6_exact(&connection->su_local->sin6.sin6_addr,
+						      connection->su_local->sin6.sin6_scope_id,
+						      peer->bgp->vrf_id);
+		}
+	}
+
+	if (!ifp && peer->conf_if)
+		ifp = if_lookup_by_name(peer->conf_if, peer->bgp->vrf_id);
+
+	if (!ifp && peer->ifname)
+		ifp = if_lookup_by_name(peer->ifname, peer->bgp->vrf_id);
+
+	if (!ifp && peer->update_if)
+		ifp = if_lookup_by_name(peer->update_if, peer->bgp->vrf_id);
+
+	return ifp;
+}
+
+/*
+ * Originate BGP Link NLRI for a BGP session
+ *
+ * This generates a Link NLRI representing a BGP session from the local
+ * router to a peer. Per draft-ietf-idr-bgp-ls-bgp-only-fabric-04 Section 4.2,
+ * the NLRI includes:
+ * - Local Node Descriptor: Local BGP router (ASN + BGP Router-ID)
+ * - Remote Node Descriptor: Peer BGP router (ASN + BGP Router-ID)
+ * - Link Descriptor: IPv4/IPv6 interface and neighbor addresses
+ * - Protocol-ID: BGP (7)
+ *
+ * @param bgp  - BGP instance
+ * @param peer - BGP peer (remote endpoint of the session)
+ * @return 0 on success, -1 on error
+ */
+static int bgp_ls_originate_bgp_link_internal(struct bgp *bgp, struct peer *peer,
+					      struct bgp_ls_attr *ls_attr)
+{
+	struct bgp_ls_nlri *nlri;
+	struct peer_connection *connection;
+	struct interface *ifp;
+	uint32_t local_link_id;
+	uint32_t remote_link_id;
+	int ret;
+
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution)
+		return 0;
+
+	if (!peer) {
+		zlog_err("BGP-LS: Cannot originate BGP link without BGP instance or peer");
+		return -1;
+	}
+
+	if (!bgp->peer_self) {
+		zlog_err("BGP-LS: No local peer for BGP link origination");
+		return -1;
+	}
+
+	connection = peer->connection;
+	ifp = bgp_ls_get_ifp_from_connection(connection);
+
+	if (!CHECK_FLAG(peer->flags, PEER_FLAG_LS_LOCAL_LINK_ID) && !ifp) {
+		zlog_err("BGP-LS: Cannot originate BGP link NLRI for peer %s: missing local link-id and interface",
+			 peer->host);
+		return -1;
+	}
+
+	nlri = bgp_ls_nlri_alloc();
+
+	/* Set NLRI type and protocol */
+	nlri->nlri_type = BGP_LS_NLRI_TYPE_LINK;
+	nlri->nlri_data.link.protocol_id = BGP_LS_PROTO_BGP;
+	nlri->nlri_data.link.identifier = bgp->ls_info->instance_id;
+
+	/* Local Node Descriptor */
+	nlri->nlri_data.link.local_node.asn = bgp->as;
+	SET_FLAG(nlri->nlri_data.link.local_node.present_tlvs, BGP_LS_NODE_DESC_AS_BIT);
+
+	nlri->nlri_data.link.local_node.bgp_router_id = bgp->router_id;
+	SET_FLAG(nlri->nlri_data.link.local_node.present_tlvs, BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	/* Remote Node Descriptor */
+	nlri->nlri_data.link.remote_node.asn = peer->as;
+	SET_FLAG(nlri->nlri_data.link.remote_node.present_tlvs, BGP_LS_NODE_DESC_AS_BIT);
+
+	nlri->nlri_data.link.remote_node.bgp_router_id = peer->remote_id;
+	SET_FLAG(nlri->nlri_data.link.remote_node.present_tlvs, BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	/* Link Descriptor: Link Local/Remote Identifiers (TLV 258) */
+	local_link_id = CHECK_FLAG(peer->flags, PEER_FLAG_LS_LOCAL_LINK_ID)
+				? peer->ls_local_link_id
+				: (uint32_t)ifp->ifindex;
+	remote_link_id = CHECK_FLAG(peer->flags, PEER_FLAG_LS_REMOTE_LINK_ID)
+				 ? peer->ls_remote_link_id
+				 : 0;
+
+	nlri->nlri_data.link.link_desc.link_local_id = local_link_id;
+	nlri->nlri_data.link.link_desc.link_remote_id = remote_link_id;
+	SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT);
+
+	/* Link Descriptor: IPv4 Neighbor Address (TLV 260) */
+	if (connection && connection->su.sa.sa_family == AF_INET) {
+		nlri->nlri_data.link.link_desc.ipv4_neigh_addr = connection->su.sin.sin_addr;
+		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
+			 BGP_LS_LINK_DESC_IPV4_NEIGH_BIT);
+	}
+
+	/* Link Descriptor: IPv6 Neighbor Address (TLV 262) */
+	if (connection && connection->su.sa.sa_family == AF_INET6) {
+		nlri->nlri_data.link.link_desc.ipv6_neigh_addr = connection->su.sin6.sin6_addr;
+		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
+			 BGP_LS_LINK_DESC_IPV6_NEIGH_BIT);
+	}
+
+	/* Link Descriptor: IPv4 Interface Address (TLV 259) */
+	if (connection && connection->su_local && connection->su_local->sa.sa_family == AF_INET) {
+		nlri->nlri_data.link.link_desc.ipv4_intf_addr = connection->su_local->sin.sin_addr;
+		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
+			 BGP_LS_LINK_DESC_IPV4_INTF_BIT);
+	}
+
+	/* Link Descriptor: IPv6 Interface Address (TLV 261) */
+	if (connection && connection->su_local && connection->su_local->sa.sa_family == AF_INET6) {
+		nlri->nlri_data.link.link_desc.ipv6_intf_addr =
+			connection->su_local->sin6.sin6_addr;
+		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
+			 BGP_LS_LINK_DESC_IPV6_INTF_BIT);
+	}
+
+	ret = bgp_ls_update(bgp, nlri, ls_attr);
+	if (ret != 0) {
+		zlog_err("BGP-LS: Failed to originate BGP link NLRI");
+		bgp_ls_nlri_free(nlri);
+		return -1;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Originated BGP Link NLRI: Local AS %u Router-ID %pI4 -> Peer AS %u Router-ID %pI4",
+			   bgp->as, &bgp->router_id, peer->as, &peer->remote_id);
+
+	bgp_ls_nlri_free(nlri);
+	return 0;
+}
+
+int bgp_ls_originate_bgp_link(struct bgp *bgp, struct peer *peer)
+{
+	return bgp_ls_refresh_bgp_link_endx_attrs(bgp, peer);
+}
+
+static bool bgp_ls_static_endx_sid_matches_peer(const struct bgp_ls_static_endx_sid *entry,
+						const struct peer *peer)
+{
+	struct interface *ifp;
+	struct in6_addr zero = IN6ADDR_ANY_INIT;
+
+	if (!entry || !peer || !peer->connection)
+		return false;
+
+	if (peer->connection->su.sa.sa_family != AF_INET6)
+		return false;
+
+	if (memcmp(&entry->nh6, &zero, sizeof(entry->nh6)) != 0 &&
+	    memcmp(&peer->connection->su.sin6.sin6_addr, &entry->nh6, sizeof(entry->nh6)) != 0)
+		return false;
+
+	if (!entry->ifindex)
+		return true;
+
+	ifp = bgp_ls_get_ifp_from_connection(peer->connection);
+	return ifp && ifp->ifindex == entry->ifindex;
+}
+
+static struct peer *bgp_ls_find_peer_by_nh6(struct bgp *bgp, const struct in6_addr *nh6,
+					    ifindex_t ifindex)
+{
+	struct listnode *node;
+	struct peer *peer;
+	struct in6_addr zero = IN6ADDR_ANY_INIT;
+	bool match_by_ifindex_only;
+
+	if (!bgp || !nh6)
+		return NULL;
+
+	match_by_ifindex_only = (memcmp(nh6, &zero, sizeof(*nh6)) == 0);
+
+	for (ALL_LIST_ELEMENTS_RO(bgp->peer, node, peer)) {
+		struct interface *ifp;
+		int status;
+
+		if (CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP))
+			continue;
+
+		if (!peer->connection || peer->connection->status != Established) {
+			status = peer->connection ? (int)peer->connection->status : -1;
+			if (BGP_DEBUG(linkstate, LINKSTATE))
+				zlog_debug("BGP-LS: peer %s skipped (not Established, status=%d)",
+					   peer->host, status);
+			continue;
+		}
+
+		if (peer->connection->su.sa.sa_family != AF_INET6) {
+			if (BGP_DEBUG(linkstate, LINKSTATE))
+				zlog_debug("BGP-LS: peer %s skipped (not AF_INET6, family=%d)",
+					   peer->host, peer->connection->su.sa.sa_family);
+			continue;
+		}
+
+		if (!match_by_ifindex_only &&
+		    memcmp(&peer->connection->su.sin6.sin6_addr, nh6, sizeof(*nh6)) != 0)
+			continue;
+
+		if (!ifindex)
+			return peer;
+
+		ifp = bgp_ls_get_ifp_from_connection(peer->connection);
+		if (ifp && ifp->ifindex == ifindex)
+			return peer;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: find_peer_by_nh6 %pI6 ifindex=%u - no matching peer found%s",
+			   nh6, ifindex, match_by_ifindex_only ? " (interface-only match)" : "");
+	return NULL;
+}
+
+static int bgp_ls_refresh_bgp_link_endx_attrs(struct bgp *bgp, struct peer *peer)
+{
+	struct bgp_ls_static_endx_sid *entry;
+	struct bgp_ls_attr *ls_attr;
+	struct bgp_ls_srv6_endx_sid *endx;
+	uint16_t count = 0;
+	uint16_t idx = 0;
+
+	if (!bgp || !bgp->ls_info || !peer)
+		return -1;
+
+	frr_each (bgp_ls_endx_sid_list, &bgp->ls_info->static_endx_sids, entry) {
+		if (bgp_ls_static_endx_sid_matches_peer(entry, peer))
+			entry->peer = peer;
+
+		if (entry->peer == peer)
+			count++;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: peer %s refresh with %u End.X SID(s)", peer->host, count);
+
+	if (count == 0)
+		return bgp_ls_originate_bgp_link_internal(bgp, peer, NULL);
+
+	ls_attr = bgp_ls_attr_alloc();
+	ls_attr->srv6_endx_sid_count = count;
+	ls_attr->srv6_endx_sid = XCALLOC(MTYPE_BGP_LS_ATTR,
+					 count * sizeof(*ls_attr->srv6_endx_sid));
+
+	frr_each (bgp_ls_endx_sid_list, &bgp->ls_info->static_endx_sids, entry) {
+		if (entry->peer != peer)
+			continue;
+
+		endx = &ls_attr->srv6_endx_sid[idx++];
+		memset(endx, 0, sizeof(*endx));
+		endx->endpoint_behavior = entry->behavior;
+		endx->flags = 0;
+		endx->algo = 0;
+		endx->weight = 0;
+		IPV6_ADDR_COPY(&endx->sid, &entry->sid);
+		if (entry->lb_len || entry->ln_len || entry->fn_len || entry->arg_len) {
+			endx->has_structure = true;
+			endx->structure.lb_len = entry->lb_len;
+			endx->structure.ln_len = entry->ln_len;
+			endx->structure.fun_len = entry->fn_len;
+			endx->structure.arg_len = entry->arg_len;
+		}
+	}
+
+	SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_SRV6_ENDX_SID_BIT);
+
+	if (bgp_ls_originate_bgp_link_internal(bgp, peer, ls_attr) != 0) {
+		bgp_ls_attr_free(ls_attr);
+		return -1;
+	}
+
+	bgp_ls_attr_free(ls_attr);
+	return 0;
+}
+
+int bgp_ls_upsert_bgp_link_srv6_endx_sid(struct bgp *bgp, const struct in6_addr *sid,
+					 uint8_t prefixlen, uint32_t action,
+					 const struct seg6local_context *ctx)
+{
+	struct bgp_ls_static_endx_sid *entry;
+	struct peer *peer;
+	struct peer *old_peer = NULL;
+	bool had_srv6_cap;
+	uint16_t behavior;
+
+	if (!bgp || !bgp->ls_info || !sid || !ctx)
+		return -1;
+
+	behavior = bgp_ls_seg6local_endx_behavior(action, ctx);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: upsert_endx_sid %pI6/%u action=%u behavior=0x%04x nh6=%pI6 ifindex=%u",
+			   sid, prefixlen, action, behavior, &ctx->nh6, ctx->ifindex);
+
+	if (behavior == SRV6_ENDPOINT_BEHAVIOR_RESERVED) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: %pI6/%u End.X behavior RESERVED - skipping", sid,
+				   prefixlen);
+		return 0;
+	}
+
+	had_srv6_cap = bgp_ls_has_srv6_capability(bgp);
+
+	entry = bgp_ls_static_endx_sid_lookup(bgp, sid, prefixlen);
+	if (!entry) {
+		entry = XCALLOC(MTYPE_BGP_LS, sizeof(*entry));
+		entry->sid = *sid;
+		entry->prefixlen = prefixlen;
+		bgp_ls_endx_sid_list_add_tail(&bgp->ls_info->static_endx_sids, entry);
+	} else {
+		old_peer = entry->peer;
+	}
+
+	entry->behavior = behavior;
+	entry->lb_len = ctx->block_len;
+	entry->ln_len = ctx->node_len;
+	entry->fn_len = ctx->function_len;
+	entry->arg_len = ctx->argument_len;
+	entry->nh6 = ctx->nh6;
+	entry->ifindex = ctx->ifindex;
+	entry->peer = NULL;
+
+	peer = bgp_ls_find_peer_by_nh6(bgp, &ctx->nh6, ctx->ifindex);
+	if (!peer) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: %pI6/%u stored pending End.X SID for nh6=%pI6 ifindex=%u until link exists",
+				   sid, prefixlen, &ctx->nh6, ctx->ifindex);
+	} else {
+		entry->peer = peer;
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS: %pI6/%u matched peer %s", sid, prefixlen, peer->host);
+	}
+
+	if (!had_srv6_cap)
+		bgp_ls_originate_bgp_node(bgp);
+
+	if (old_peer && old_peer != peer)
+		bgp_ls_refresh_bgp_link_endx_attrs(bgp, old_peer);
+
+	if (!peer)
+		return 0;
+
+	return bgp_ls_refresh_bgp_link_endx_attrs(bgp, peer);
+}
+
+int bgp_ls_delete_bgp_link_srv6_endx_sid(struct bgp *bgp, const struct in6_addr *sid,
+					 uint8_t prefixlen)
+{
+	struct bgp_ls_static_endx_sid *entry;
+	struct peer *peer;
+
+	if (!bgp || !bgp->ls_info || !sid)
+		return -1;
+
+	entry = bgp_ls_static_endx_sid_lookup(bgp, sid, prefixlen);
+	if (!entry)
+		return 0;
+
+	peer = entry->peer;
+	bgp_ls_endx_sid_list_del(&bgp->ls_info->static_endx_sids, entry);
+	XFREE(MTYPE_BGP_LS, entry);
+
+	if (!bgp_ls_has_srv6_capability(bgp))
+		bgp_ls_originate_bgp_node(bgp);
+
+	if (!peer)
+		return 0;
+
+	return bgp_ls_refresh_bgp_link_endx_attrs(bgp, peer);
+}
+
+/*
+ * Originate BGP Prefix NLRI - Helper
+ *
+ * Internal helper for originating prefix NLRIs. Handles common prefix
+ * origination logic used by both BGP route prefixes and SRv6 locator prefixes.
+ *
+ * @param bgp - BGP instance
+ * @param afi - Address family (AFI_IP or AFI_IP6)
+ * @param prefix - Prefix to originate
+ * @param route_type - BGP-LS route type for prefix descriptor
+ * @param ls_attr - Optional BGP-LS attributes (NULL if none)
+ * @return 0 on success, -1 on failure
+ */
+static int bgp_ls_originate_prefix_internal(struct bgp *bgp, afi_t afi, const struct prefix *prefix,
+					    enum bgp_ls_bgp_route_type route_type,
+					    struct bgp_ls_attr *ls_attr)
+{
+	struct bgp_ls_nlri *nlri;
+	int ret;
+
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution || !prefix)
+		return -1;
+
+	nlri = bgp_ls_nlri_alloc();
+
+	/* Set NLRI type and protocol */
+	if (afi == AFI_IP)
+		nlri->nlri_type = BGP_LS_NLRI_TYPE_IPV4_PREFIX;
+	else if (afi == AFI_IP6)
+		nlri->nlri_type = BGP_LS_NLRI_TYPE_IPV6_PREFIX;
+	else {
+		bgp_ls_nlri_free(nlri);
+		return -1;
+	}
+
+	nlri->nlri_data.prefix.protocol_id = BGP_LS_PROTO_BGP;
+	nlri->nlri_data.prefix.identifier = bgp->ls_info->instance_id;
+
+	/* Local Node Descriptor */
+	nlri->nlri_data.prefix.local_node.asn = bgp->as;
+	SET_FLAG(nlri->nlri_data.prefix.local_node.present_tlvs, BGP_LS_NODE_DESC_AS_BIT);
+
+	nlri->nlri_data.prefix.local_node.bgp_router_id = bgp->router_id;
+	SET_FLAG(nlri->nlri_data.prefix.local_node.present_tlvs,
+		 BGP_LS_NODE_DESC_BGP_ROUTER_ID_BIT);
+
+	/* Prefix Descriptor */
+	nlri->nlri_data.prefix.prefix_desc.bgp_route_type = route_type;
+	SET_FLAG(nlri->nlri_data.prefix.prefix_desc.present_tlvs,
+		 BGP_LS_PREFIX_DESC_BGP_ROUTE_TYPE_BIT);
+
+	prefix_copy(&nlri->nlri_data.prefix.prefix_desc.prefix, prefix);
+	SET_FLAG(nlri->nlri_data.prefix.prefix_desc.present_tlvs, BGP_LS_PREFIX_DESC_IP_REACH_BIT);
+
+	ret = bgp_ls_update(bgp, nlri, ls_attr);
+	bgp_ls_nlri_free(nlri);
+
+	return ret;
+}
+
+/*
+ * Originate BGP Prefix NLRI
+ *
+ * Reference: draft-ietf-idr-bgp-ls-bgp-only-fabric-04 Section 4.3
+ *
+ * Generates a BGP-LS Prefix NLRI for BGP routes from the local RIB.
+ *
+ * @param bgp - BGP instance
+ * @param afi - Address family (AFI_IP or AFI_IP6)
+ * @param safi - Subsequent address family (SAFI_UNICAST, etc.)
+ * @param dest - BGP destination (route)
+ * @param path - BGP path info
+ * @return 0 on success, -1 on failure
+ */
+int bgp_ls_originate_bgp_prefix(struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *dest,
+				struct bgp_path_info *path)
+{
+	const struct prefix *p;
+	enum bgp_ls_bgp_route_type route_type;
+
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution)
+		return 0;
+
+	if (!dest || !path) {
+		zlog_err("BGP-LS: Invalid parameters for BGP prefix origination");
+		return -1;
+	}
+
+	if (safi != SAFI_UNICAST)
+		return 0;
+
+	/* Get the prefix */
+	p = bgp_dest_get_prefix(dest);
+	if (!p) {
+		zlog_err("BGP-LS: Cannot get prefix from destination");
+		return -1;
+	}
+
+	/* Determine BGP route type */
+	if (path->type == ZEBRA_ROUTE_LOCAL)
+		route_type = BGP_LS_BGP_RT_LOCAL;
+	else if (path->type == ZEBRA_ROUTE_CONNECT)
+		route_type = BGP_LS_BGP_RT_ATTACHED;
+	else if (path->type == ZEBRA_ROUTE_BGP && path->peer && path->peer->sort == BGP_PEER_EBGP)
+		route_type = BGP_LS_BGP_RT_EXTERNAL_BGP;
+	else if (path->type == ZEBRA_ROUTE_BGP && path->peer && path->peer->sort == BGP_PEER_IBGP)
+		route_type = BGP_LS_BGP_RT_INTERNAL_BGP;
+	else
+		route_type = BGP_LS_BGP_RT_REDISTRIBUTED;
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Originating BGP Prefix NLRI for %pFX", p);
+
+	return bgp_ls_originate_prefix_internal(bgp, afi, p, route_type, NULL);
+}
+
+int bgp_ls_originate_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locator *locator)
+{
+	struct bgp_ls_attr *ls_attr;
+	struct bgp_ls_nlri *existing_nlri;
+	bool had_srv6_cap;
+	bool is_new_locator_nlri;
+	int ret;
+
+	if (!bgp || !bgp->ls_info || !locator)
+		return -1;
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: entry instance=%s locator=%s prefix=%pFX algo=%u",
+			   bgp->name_pretty, locator->name, &locator->prefix, locator->algonum);
+
+	if (!bgp->ls_info->enable_distribution) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS [locator]: skipping locator %s because distribution is disabled",
+				   locator->name);
+		return 0;
+	}
+
+	if (locator->prefix.family != AF_INET6) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("BGP-LS [locator]: skipping locator %s because family=%u is not IPv6",
+				   locator->name, locator->prefix.family);
+		return 0;
+	}
+
+	had_srv6_cap = bgp_ls_has_srv6_capability(bgp);
+	existing_nlri = bgp_ls_lookup_bgp_prefix_nlri(bgp, (const struct prefix *)&locator->prefix,
+						      BGP_LS_BGP_RT_LOCAL);
+	is_new_locator_nlri = (existing_nlri == NULL);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: advertising locator %s prefix=%pFX algo=%u",
+			   locator->name, &locator->prefix, locator->algonum);
+
+	/* Prepare SRv6 locator attributes */
+	ls_attr = bgp_ls_attr_alloc();
+	ls_attr->srv6_locator_flags = 0;
+	ls_attr->srv6_locator_algo = locator->algonum;
+	ls_attr->srv6_locator_metric = 0;
+	SET_FLAG(ls_attr->present_tlvs, BGP_LS_ATTR_SRV6_LOCATOR_BIT);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: update prefix=%pFX route_type=0x%02x algo=%u attr_present=0x%llx",
+			   &locator->prefix, BGP_LS_BGP_RT_LOCAL, locator->algonum,
+			   (unsigned long long)ls_attr->present_tlvs);
+
+	/* Originate prefix NLRI with SRv6 locator attributes */
+	ret = bgp_ls_originate_prefix_internal(bgp, AFI_IP6,
+					       (const struct prefix *)&locator->prefix,
+					       BGP_LS_BGP_RT_LOCAL, ls_attr);
+	bgp_ls_attr_free(ls_attr);
+
+	if (ret != 0) {
+		zlog_err("BGP-LS: Failed to originate SRv6 locator prefix NLRI for %pFX",
+			 &locator->prefix);
+		return -1;
+	}
+
+	if (is_new_locator_nlri)
+		bgp->ls_info->srv6_locator_nlri_count++;
+
+	if (!had_srv6_cap)
+		ret = bgp_ls_originate_bgp_node(bgp);
+
+	if (!had_srv6_cap && BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: node re-originate for SRv6 capability ret=%d", ret);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: originated locator prefix NLRI for %s",
+			   locator->name);
+
+	return 0;
+}
+
+int bgp_ls_withdraw_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locator *locator)
+{
+	struct bgp_ls_nlri *nlri;
+	int ret;
+	bool had_srv6_cap;
+
+	if (!bgp || !bgp->ls_info || !locator)
+		return -1;
+
+	if (!bgp->ls_info->enable_distribution)
+		return 0;
+
+	if (locator->prefix.family != AF_INET6)
+		return 0;
+
+	nlri = bgp_ls_lookup_bgp_prefix_nlri(bgp, (const struct prefix *)&locator->prefix,
+					     BGP_LS_BGP_RT_LOCAL);
+	if (!nlri)
+		return 0;
+
+	had_srv6_cap = bgp_ls_has_srv6_capability(bgp);
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS [locator]: withdrawn locator prefix NLRI for %s", locator->name);
+
+	ret = bgp_ls_withdraw(bgp, nlri);
+	if (ret != 0)
+		return ret;
+
+	if (bgp->ls_info->srv6_locator_nlri_count > 0)
+		bgp->ls_info->srv6_locator_nlri_count--;
+
+	if (bgp->ls_info->srv6_locator_nlri_count == 0 && had_srv6_cap)
+		bgp_ls_originate_bgp_node(bgp);
+
+	return 0;
+}
+
+/*
+ * Export BGP topology as BGP-LS NLRIs.
+ *
+ * Generates Node, Link, and Prefix NLRIs for the local BGP topology.
+ *
+ * @param bgp - BGP instance
+ * @return 0 on success, -1 on invalid input or when distribution is disabled
+ */
+int bgp_ls_export_bgp_topology(struct bgp *bgp)
+{
+	struct listnode *node;
+	struct peer *peer;
+	int nlri_count = 0;
+
+	if (!bgp || !bgp->ls_info || !bgp->ls_info->enable_distribution) {
+		zlog_err("BGP-LS: BGP topology distribution not enabled");
+		return -1;
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Exporting BGP topology for instance %s", bgp->name_pretty);
+
+	/* Export the local node once. */
+	if (bgp_ls_originate_bgp_node(bgp) != 0)
+		zlog_warn("BGP-LS: Failed to originate local BGP node NLRI");
+	else
+		nlri_count++;
+
+	/* Export one link NLRI for each established non-group peer. */
+	for (ALL_LIST_ELEMENTS_RO(bgp->peer, node, peer)) {
+		if (CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP))
+			continue;
+
+		if (!peer->connection || peer->connection->status != Established)
+			continue;
+
+		if (bgp_ls_originate_bgp_link(bgp, peer) != 0)
+			zlog_warn("BGP-LS: Failed to originate link NLRI for peer %s", peer->host);
+		else
+			nlri_count++;
+	}
+
+	/* Export prefix NLRIs from the IPv4/IPv6 unicast RIBs. */
+	afi_t afis[] = { AFI_IP, AFI_IP6 };
+
+	for (int i = 0; i < 2; i++) {
+		afi_t afi = afis[i];
+		struct bgp_dest *dest;
+		struct bgp_path_info *path;
+
+		if (!bgp->rib[afi][SAFI_UNICAST])
+			continue;
+
+		for (dest = bgp_table_top(bgp->rib[afi][SAFI_UNICAST]); dest;
+		     dest = bgp_route_next(dest)) {
+			for (path = bgp_dest_get_bgp_path_info(dest); path; path = path->next) {
+				if (bgp_ls_originate_bgp_prefix(bgp, afi, SAFI_UNICAST, dest,
+								path) != 0) {
+					zlog_warn("BGP-LS: Failed to originate prefix NLRI for %pFX",
+						  bgp_dest_get_prefix(dest));
+				} else
+					nlri_count++;
+			}
+		}
+	}
+
+	if (BGP_DEBUG(linkstate, LINKSTATE))
+		zlog_debug("BGP-LS: Exported %d BGP-LS NLRIs", nlri_count);
+
+	return 0;
+}
+
+/* Withdraw all locally originated BGP-LS routes. */
+void bgp_ls_withdraw_all(struct bgp *bgp)
+{
+	struct bgp_dest *dest;
+	struct bgp_table *table;
+	struct bgp_ls_nlri *nlri;
+
+	if (!bgp)
+		return;
+
+	if (CHECK_FLAG(bgp->flags, BGP_FLAG_DELETE_IN_PROGRESS) || bgp->peer_self == NULL)
+		return;
+
+	if (!bgp->ls_info)
+		return;
+
+	table = bgp->rib[AFI_BGP_LS][SAFI_BGP_LS];
+	if (!table)
+		return;
+
+	for (dest = bgp_table_top(table); dest; dest = bgp_route_next(dest)) {
+		nlri = dest->ls_nlri;
+		if (!nlri)
+			continue;
+
+		bgp_ls_withdraw(bgp, nlri);
+	}
+
+	bgp->ls_info->srv6_locator_nlri_count = 0;
+}
+
+static struct bgp_ls_nlri *bgp_ls_lookup_bgp_link_nlri(struct bgp *bgp, struct peer *peer)
+{
+	struct bgp_dest *dest;
+	struct bgp_table *table;
+	struct bgp_ls_nlri *nlri;
+	struct interface *ifp;
+	struct peer_connection *connection;
+	bool expect_link_id;
+	uint32_t expected_local_link_id = 0;
+	uint32_t expected_remote_link_id = 0;
+
+	connection = peer->connection;
+	ifp = bgp_ls_get_ifp_from_connection(connection);
+
+	expect_link_id = CHECK_FLAG(peer->flags, PEER_FLAG_LS_LOCAL_LINK_ID) || (ifp != NULL);
+	if (expect_link_id) {
+		expected_local_link_id = CHECK_FLAG(peer->flags, PEER_FLAG_LS_LOCAL_LINK_ID)
+						 ? peer->ls_local_link_id
+						 : (uint32_t)ifp->ifindex;
+		expected_remote_link_id = CHECK_FLAG(peer->flags, PEER_FLAG_LS_REMOTE_LINK_ID)
+						  ? peer->ls_remote_link_id
+						  : 0;
+	}
+
+	table = bgp->rib[AFI_BGP_LS][SAFI_BGP_LS];
+	if (!table)
+		return NULL;
+
+	for (dest = bgp_table_top(table); dest; dest = bgp_route_next(dest)) {
+		nlri = dest->ls_nlri;
+		if (!nlri)
+			continue;
+
+		if (nlri->nlri_type != BGP_LS_NLRI_TYPE_LINK)
+			continue;
+		if (nlri->nlri_data.link.protocol_id != BGP_LS_PROTO_BGP)
+			continue;
+
+		if (nlri->nlri_data.link.local_node.asn != bgp->as)
+			continue;
+
+		if (nlri->nlri_data.link.remote_node.asn != peer->as)
+			continue;
+
+		if (!IPV4_ADDR_SAME(&nlri->nlri_data.link.local_node.bgp_router_id,
+				    &bgp->router_id))
+			continue;
+
+		if (!IPV4_ADDR_SAME(&nlri->nlri_data.link.remote_node.bgp_router_id,
+				    &peer->remote_id))
+			continue;
+
+		if (expect_link_id) {
+			if (!CHECK_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
+					BGP_LS_LINK_DESC_LINK_ID_BIT))
+				continue;
+
+			if (nlri->nlri_data.link.link_desc.link_local_id != expected_local_link_id)
+				continue;
+
+			if (nlri->nlri_data.link.link_desc.link_remote_id !=
+			    expected_remote_link_id)
+				continue;
+		}
+
+		return nlri;
+	}
+
+	return NULL;
+}
+
+static struct bgp_ls_nlri *bgp_ls_lookup_bgp_prefix_nlri(struct bgp *bgp, const struct prefix *p,
+							 enum bgp_ls_bgp_route_type route_type)
+{
+	struct bgp_dest *bn;
+	struct bgp_table *table;
+	struct bgp_ls_nlri *nlri;
+	enum bgp_ls_nlri_type expected_nlri_type;
+	uint64_t expected_identifier;
+
+	expected_nlri_type = (p->family == AF_INET) ? BGP_LS_NLRI_TYPE_IPV4_PREFIX
+						    : BGP_LS_NLRI_TYPE_IPV6_PREFIX;
+	expected_identifier = bgp->ls_info->instance_id;
+
+	table = bgp->rib[AFI_BGP_LS][SAFI_BGP_LS];
+	if (!table)
+		return NULL;
+
+	for (bn = bgp_table_top(table); bn; bn = bgp_route_next(bn)) {
+		nlri = bn->ls_nlri;
+		if (!nlri)
+			continue;
+
+		if (nlri->nlri_type != expected_nlri_type)
+			continue;
+
+		if (nlri->nlri_data.prefix.protocol_id != BGP_LS_PROTO_BGP)
+			continue;
+
+		if (nlri->nlri_data.prefix.identifier != expected_identifier)
+			continue;
+
+		if (nlri->nlri_data.prefix.local_node.asn != bgp->as)
+			continue;
+
+		if (!IPV4_ADDR_SAME(&nlri->nlri_data.prefix.local_node.bgp_router_id,
+				    &bgp->router_id))
+			continue;
+
+		if (nlri->nlri_data.prefix.prefix_desc.bgp_route_type != route_type)
+			continue;
+
+		if (!prefix_same(&nlri->nlri_data.prefix.prefix_desc.prefix, p))
+			continue;
+
+		return nlri;
+	}
+
+	return NULL;
+}
+
+int bgp_ls_withdraw_bgp_link(struct bgp *bgp, struct peer *peer)
+{
+	struct bgp_ls_nlri *nlri;
+
+	if (!bgp || !peer) {
+		flog_err(EC_BGP_LS_PACKET, "BGP-LS: Invalid parameters to %s", __func__);
+		return -1;
+	}
+
+	if (CHECK_FLAG(bgp->flags, BGP_FLAG_DELETE_IN_PROGRESS) || bgp->peer_self == NULL)
+		return 0;
+
+	if (!bgp->ls_info) {
+		if (BGP_DEBUG(linkstate, LINKSTATE))
+			zlog_debug("%s: No BGP-LS info exists for withdraw", __func__);
+
+		return 0;
+	}
+
+	nlri = bgp_ls_lookup_bgp_link_nlri(bgp, peer);
+	if (!nlri)
+		return 0;
+
+	return bgp_ls_withdraw(bgp, nlri);
+}
+
+int bgp_ls_withdraw_bgp_prefix(struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *dest,
+			       struct bgp_path_info *path)
+{
+	const struct prefix *p;
+	enum bgp_ls_bgp_route_type route_type;
+	struct bgp_ls_nlri *nlri;
+
+	if (!bgp || !dest || !path) {
+		zlog_err("BGP-LS: Invalid parameters for BGP prefix withdraw");
+		return -1;
+	}
+
+	if (CHECK_FLAG(bgp->flags, BGP_FLAG_DELETE_IN_PROGRESS) || bgp->peer_self == NULL)
+		return 0;
+
+	if (!bgp->ls_info)
+		return 0;
+
+	if (safi != SAFI_UNICAST)
+		return 0;
+
+	p = bgp_dest_get_prefix(dest);
+	if (!p) {
+		zlog_err("BGP-LS: Cannot get prefix from destination");
+		return -1;
+	}
+
+	if ((afi == AFI_IP && p->family != AF_INET) || (afi == AFI_IP6 && p->family != AF_INET6))
+		return 0;
+
+	if (path->type == ZEBRA_ROUTE_LOCAL)
+		route_type = BGP_LS_BGP_RT_LOCAL;
+	else if (path->type == ZEBRA_ROUTE_CONNECT)
+		route_type = BGP_LS_BGP_RT_ATTACHED;
+	else if (path->type == ZEBRA_ROUTE_BGP && path->peer && path->peer->sort == BGP_PEER_EBGP)
+		route_type = BGP_LS_BGP_RT_EXTERNAL_BGP;
+	else if (path->type == ZEBRA_ROUTE_BGP && path->peer && path->peer->sort == BGP_PEER_IBGP)
+		route_type = BGP_LS_BGP_RT_INTERNAL_BGP;
+	else
+		route_type = BGP_LS_BGP_RT_REDISTRIBUTED;
+
+	nlri = bgp_ls_lookup_bgp_prefix_nlri(bgp, p, route_type);
+	if (!nlri)
+		return 0;
+
+	return bgp_ls_withdraw(bgp, nlri);
 }

@@ -28,8 +28,8 @@
 
 void write_object_header(struct pcep_object_header *object_hdr,
 			 uint16_t object_length, uint8_t *buf);
-void pcep_decode_object_hdr(const uint8_t *obj_buf,
-			    struct pcep_object_header *obj_hdr);
+static void pcep_decode_object_hdr(const uint8_t *obj_buf,
+				   struct pcep_object_header *obj_hdr);
 void set_ro_subobj_fields(struct pcep_object_ro_subobj *subobj, bool flag_l,
 			  uint8_t subobj_type);
 
@@ -935,8 +935,8 @@ void encode_ipv6(struct in6_addr *src_ipv6, uint32_t *dst)
  * Decoding functions.
  */
 
-void pcep_decode_object_hdr(const uint8_t *obj_buf,
-			    struct pcep_object_header *obj_hdr)
+static void pcep_decode_object_hdr(const uint8_t *obj_buf,
+				   struct pcep_object_header *obj_hdr)
 {
 	memset(obj_hdr, 0, sizeof(struct pcep_object_header));
 
@@ -985,13 +985,31 @@ bool pcep_object_has_tlvs(struct pcep_object_header *object_hdr)
 	return (object_hdr->encoded_object_length - object_length) > 0;
 }
 
-struct pcep_object_header *pcep_decode_object(const uint8_t *obj_buf)
+struct pcep_object_header *pcep_decode_object(const uint8_t *obj_buf, size_t buflen)
 {
 
 	struct pcep_object_header object_hdr;
+
+	if (buflen < OBJECT_HEADER_LENGTH) {
+		pcep_log(LOG_INFO, "%s: Cannot decode Object: invalid length", __func__);
+		return NULL;
+	}
+
 	/* Only initializes and decodes the Object Header: class, type, flags,
 	 * and length */
 	pcep_decode_object_hdr(obj_buf, &object_hdr);
+
+	if (object_hdr.encoded_object_length < OBJECT_HEADER_LENGTH) {
+		pcep_log(LOG_INFO, "%s: Cannot decode Object: invalid header length %d",
+			 __func__, object_hdr.encoded_object_length);
+		return NULL;
+	}
+
+	if (object_hdr.encoded_object_length > buflen) {
+		pcep_log(LOG_INFO, "%s: Cannot decode Object: invalid length %d",
+			 __func__, object_hdr.encoded_object_length);
+		return NULL;
+	}
 
 	if (object_hdr.object_class >= MAX_OBJECT_ENCODER_INDEX) {
 		pcep_log(LOG_INFO,
@@ -1010,7 +1028,8 @@ struct pcep_object_header *pcep_decode_object(const uint8_t *obj_buf)
 	}
 
 	/* The object decoders will start decoding the object body, if
-	 * anything from the header is needed, they have the object_hdr */
+	 * anything from the header is needed, they have the object_hdr
+	 */
 	struct pcep_object_header *object =
 		obj_decoder(&object_hdr, obj_buf + OBJECT_HEADER_LENGTH);
 	if (object == NULL) {
@@ -1060,6 +1079,9 @@ common_object_create(struct pcep_object_header *hdr, uint16_t new_obj_length)
 struct pcep_object_header *pcep_decode_obj_open(struct pcep_object_header *hdr,
 						const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_open *obj =
 		(struct pcep_object_open *)common_object_create(
 			hdr, sizeof(struct pcep_object_open));
@@ -1075,6 +1097,9 @@ struct pcep_object_header *pcep_decode_obj_open(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_rp(struct pcep_object_header *hdr,
 					      const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4 + 4))
+		return NULL;
+
 	struct pcep_object_rp *obj =
 		(struct pcep_object_rp *)common_object_create(
 			hdr, sizeof(struct pcep_object_rp));
@@ -1092,6 +1117,9 @@ struct pcep_object_header *pcep_decode_obj_rp(struct pcep_object_header *hdr,
 struct pcep_object_header *
 pcep_decode_obj_notify(struct pcep_object_header *hdr, const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_notify *obj =
 		(struct pcep_object_notify *)common_object_create(
 			hdr, sizeof(struct pcep_object_notify));
@@ -1105,12 +1133,15 @@ pcep_decode_obj_notify(struct pcep_object_header *hdr, const uint8_t *obj_buf)
 struct pcep_object_header *
 pcep_decode_obj_nopath(struct pcep_object_header *hdr, const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_nopath *obj =
 		(struct pcep_object_nopath *)common_object_create(
 			hdr, sizeof(struct pcep_object_nopath));
 
 	obj->ni = (obj_buf[0] >> 1);
-	obj->flag_c = (obj_buf[0] & OBJECT_NOPATH_FLAG_C);
+	obj->flag_c = (obj_buf[1] & OBJECT_NOPATH_FLAG_C);
 
 	return (struct pcep_object_header *)obj;
 }
@@ -1123,6 +1154,9 @@ pcep_decode_obj_association(struct pcep_object_header *hdr,
 	uint32_t *uint32_ptr = (uint32_t *)obj_buf;
 
 	if (hdr->object_type == PCEP_OBJ_TYPE_ASSOCIATION_IPV4) {
+		if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 8 + 4))
+			return NULL;
+
 		struct pcep_object_association_ipv4 *obj =
 			(struct pcep_object_association_ipv4 *)
 				common_object_create(
@@ -1136,6 +1170,9 @@ pcep_decode_obj_association(struct pcep_object_header *hdr,
 
 		return (struct pcep_object_header *)obj;
 	} else if (hdr->object_type == PCEP_OBJ_TYPE_ENDPOINT_IPV6) {
+		if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 8 + 16))
+			return NULL;
+
 		struct pcep_object_association_ipv6 *obj =
 			(struct pcep_object_association_ipv6 *)
 				common_object_create(
@@ -1160,6 +1197,9 @@ pcep_decode_obj_endpoints(struct pcep_object_header *hdr,
 	uint32_t *uint32_ptr = (uint32_t *)obj_buf;
 
 	if (hdr->object_type == PCEP_OBJ_TYPE_ENDPOINT_IPV4) {
+		if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4 + 4))
+			return NULL;
+
 		struct pcep_object_endpoints_ipv4 *obj =
 			(struct pcep_object_endpoints_ipv4 *)
 				common_object_create(
@@ -1171,6 +1211,9 @@ pcep_decode_obj_endpoints(struct pcep_object_header *hdr,
 
 		return (struct pcep_object_header *)obj;
 	} else if (hdr->object_type == PCEP_OBJ_TYPE_ENDPOINT_IPV6) {
+		if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 16 + 16))
+			return NULL;
+
 		struct pcep_object_endpoints_ipv6 *obj =
 			(struct pcep_object_endpoints_ipv6 *)
 				common_object_create(
@@ -1191,6 +1234,9 @@ struct pcep_object_header *
 pcep_decode_obj_bandwidth(struct pcep_object_header *hdr,
 			  const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_bandwidth *obj =
 		(struct pcep_object_bandwidth *)common_object_create(
 			hdr, sizeof(struct pcep_object_bandwidth));
@@ -1206,6 +1252,9 @@ pcep_decode_obj_bandwidth(struct pcep_object_header *hdr,
 struct pcep_object_header *
 pcep_decode_obj_metric(struct pcep_object_header *hdr, const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 8))
+		return NULL;
+
 	struct pcep_object_metric *obj =
 		(struct pcep_object_metric *)common_object_create(
 			hdr, sizeof(struct pcep_object_metric));
@@ -1223,6 +1272,9 @@ pcep_decode_obj_metric(struct pcep_object_header *hdr, const uint8_t *obj_buf)
 struct pcep_object_header *pcep_decode_obj_lspa(struct pcep_object_header *hdr,
 						const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 12 + 4))
+		return NULL;
+
 	struct pcep_object_lspa *obj =
 		(struct pcep_object_lspa *)common_object_create(
 			hdr, sizeof(struct pcep_object_lspa));
@@ -1241,6 +1293,9 @@ struct pcep_object_header *pcep_decode_obj_lspa(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_svec(struct pcep_object_header *hdr,
 						const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_svec *obj =
 		(struct pcep_object_svec *)common_object_create(
 			hdr, sizeof(struct pcep_object_svec));
@@ -1269,6 +1324,9 @@ struct pcep_object_header *pcep_decode_obj_svec(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_error(struct pcep_object_header *hdr,
 						 const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_error *obj =
 		(struct pcep_object_error *)common_object_create(
 			hdr, sizeof(struct pcep_object_error));
@@ -1282,6 +1340,9 @@ struct pcep_object_header *pcep_decode_obj_error(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_close(struct pcep_object_header *hdr,
 						 const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_close *obj =
 		(struct pcep_object_close *)common_object_create(
 			hdr, sizeof(struct pcep_object_close));
@@ -1294,6 +1355,9 @@ struct pcep_object_header *pcep_decode_obj_close(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_srp(struct pcep_object_header *hdr,
 					       const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4 + 4))
+		return NULL;
+
 	struct pcep_object_srp *obj =
 		(struct pcep_object_srp *)common_object_create(
 			hdr, sizeof(struct pcep_object_srp));
@@ -1307,6 +1371,9 @@ struct pcep_object_header *pcep_decode_obj_srp(struct pcep_object_header *hdr,
 struct pcep_object_header *pcep_decode_obj_lsp(struct pcep_object_header *hdr,
 					       const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_lsp *obj =
 		(struct pcep_object_lsp *)common_object_create(
 			hdr, sizeof(struct pcep_object_lsp));
@@ -1326,18 +1393,26 @@ struct pcep_object_header *
 pcep_decode_obj_vendor_info(struct pcep_object_header *hdr,
 			    const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 8))
+		return NULL;
+
 	struct pcep_object_vendor_info *obj =
 		(struct pcep_object_vendor_info *)common_object_create(
 			hdr, sizeof(struct pcep_object_vendor_info));
 
 	obj->enterprise_number = ntohl(*((uint32_t *)(obj_buf)));
 	obj->enterprise_specific_info = ntohl(*((uint32_t *)(obj_buf + 4)));
-	if (obj->enterprise_number == ENTERPRISE_NUMBER_CISCO
-	    && obj->enterprise_specific_info == ENTERPRISE_COLOR_CISCO)
-		obj->enterprise_specific_info1 =
-			ntohl(*((uint32_t *)(obj_buf + 8)));
-	else
+	if (obj->enterprise_number == ENTERPRISE_NUMBER_CISCO &&
+	    obj->enterprise_specific_info == ENTERPRISE_COLOR_CISCO) {
+		if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 8 + 4)) {
+			pcep_obj_free_object((struct pcep_object_header *)obj);
+			return NULL;
+		}
+
+		obj->enterprise_specific_info1 = ntohl(*((uint32_t *)(obj_buf + 8)));
+	} else {
 		obj->enterprise_specific_info1 = 0;
+	}
 
 	return (struct pcep_object_header *)obj;
 }
@@ -1346,6 +1421,9 @@ struct pcep_object_header *
 pcep_decode_obj_inter_layer(struct pcep_object_header *hdr,
 			    const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_inter_layer *obj =
 		(struct pcep_object_inter_layer *)common_object_create(
 			hdr, sizeof(struct pcep_object_inter_layer));
@@ -1360,6 +1438,9 @@ struct pcep_object_header *
 pcep_decode_obj_switch_layer(struct pcep_object_header *hdr,
 			     const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 4))
+		return NULL;
+
 	struct pcep_object_switch_layer *obj =
 		(struct pcep_object_switch_layer *)common_object_create(
 			hdr, sizeof(struct pcep_object_switch_layer));
@@ -1388,6 +1469,9 @@ struct pcep_object_header *
 pcep_decode_obj_req_adap_cap(struct pcep_object_header *hdr,
 			     const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 2))
+		return NULL;
+
 	struct pcep_object_req_adap_cap *obj =
 		(struct pcep_object_req_adap_cap *)common_object_create(
 			hdr, sizeof(struct pcep_object_req_adap_cap));
@@ -1402,6 +1486,9 @@ struct pcep_object_header *
 pcep_decode_obj_server_ind(struct pcep_object_header *hdr,
 			   const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 2))
+		return NULL;
+
 	struct pcep_object_server_indication *obj =
 		(struct pcep_object_server_indication *)common_object_create(
 			hdr, sizeof(struct pcep_object_server_indication));
@@ -1416,6 +1503,9 @@ struct pcep_object_header *
 pcep_decode_obj_objective_function(struct pcep_object_header *hdr,
 				   const uint8_t *obj_buf)
 {
+	if (hdr->encoded_object_length < (OBJECT_HEADER_LENGTH + 2))
+		return NULL;
+
 	struct pcep_object_objective_function *obj =
 		(struct pcep_object_objective_function *)common_object_create(
 			hdr, sizeof(struct pcep_object_objective_function));
@@ -1565,8 +1655,12 @@ struct pcep_object_header *pcep_decode_obj_ro(struct pcep_object_header *hdr,
 		} break;
 
 		case RO_SUBOBJ_TYPE_UNNUM: {
-			/* Validate length */
-			if (subobj_length != 2 + LENGTH_2WORDS) {
+			/*
+			 * Validate length: subobj header + 2 reserved bytes +
+			 * Router ID + Interface ID (see RFC 3477).
+			 */
+			if (subobj_length != OBJECT_RO_SUBOBJ_HEADER_LENGTH + 2
+						     + LENGTH_2WORDS) {
 				pcep_log(LOG_INFO,
 					 "%s: Invalid length ro subobj type [%d] length [%d]",
 					 __func__, subobj_type, subobj_length);
@@ -1583,10 +1677,15 @@ struct pcep_object_header *pcep_decode_obj_ro(struct pcep_object_header *hdr,
 				(struct pcep_object_ro_subobj *)unum, flag_l,
 				subobj_type);
 
-			memcpy(&(unum->interface_id), (obj_buf + read_count), LENGTH_1WORD);
-			read_count += LENGTH_1WORD;
-			unum->interface_id = ntohl(unum->interface_id);
+			/*
+			 * Skip the 2 reserved bytes, then read the TE Router ID
+			 * followed by the Interface ID, matching the encoder.
+			 */
+			read_count += 2;
 			memcpy(&(unum->router_id.s_addr), (obj_buf + read_count), LENGTH_1WORD);
+			read_count += LENGTH_1WORD;
+			memcpy(&(unum->interface_id), (obj_buf + read_count), LENGTH_1WORD);
+			unum->interface_id = ntohl(unum->interface_id);
 			read_count += LENGTH_1WORD;
 
 			dll_append(obj->sub_objects, unum);

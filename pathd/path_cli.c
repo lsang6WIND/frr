@@ -486,15 +486,16 @@ int segment_list_has_prefix(
  */
 /* clang-format off */
 DEFPY_YANG(srte_segment_list_segment, srte_segment_list_segment_cmd,
-      "index (0-4294967295)$index <[mpls$has_mpls_label label (16-1048575)$label] "
+      "[no] index (0-4294967295)$index ![mpls$has_mpls_label label (16-1048575)$label"
       "|"
-      "[nai$has_nai <"
+      "nai$has_nai <"
       "prefix <A.B.C.D/M$prefix_ipv4|X:X::X:X/M$prefix_ipv6>"
       "<algorithm$has_algo (0-1)$algo| iface$has_iface_id (0-4294967295)$iface_id>"
       "| adjacency$has_adj "
       "<A.B.C.D$adj_src_ipv4 A.B.C.D$adj_dst_ipv4|X:X::X:X$adj_src_ipv6 X:X::X:X$adj_dst_ipv6>"
-      ">]"
-      ">",
+      ">"
+      "]",
+      NO_STR
       "Index\n"
       "Index Value\n"
       "MPLS or IP Label\n"
@@ -518,8 +519,13 @@ DEFPY_YANG(srte_segment_list_segment, srte_segment_list_segment_cmd,
 	char xpath[XPATH_MAXLEN];
 	int status = CMD_SUCCESS;
 
-
 	snprintf(xpath, sizeof(xpath), "./segment[index='%s']", index_str);
+
+	if (no) {
+		nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+		return nb_cli_apply_changes(vty, NULL);
+	}
+
 	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
 
 	if (has_mpls_label != NULL) {
@@ -545,21 +551,6 @@ DEFPY_YANG(srte_segment_list_segment, srte_segment_list_segment_cmd,
 		if (status != CMD_SUCCESS)
 			return status;
 	}
-
-	return nb_cli_apply_changes(vty, NULL);
-}
-
-DEFPY_YANG(srte_segment_list_no_segment,
-      srte_segment_list_no_segment_cmd,
-      "no index (0-4294967295)$index",
-      NO_STR
-      "Index\n"
-      "Index Value\n")
-{
-	char xpath[XPATH_MAXLEN];
-
-	snprintf(xpath, sizeof(xpath), "./segment[index='%s']", index_str);
-	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
 
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -1364,10 +1355,7 @@ void path_cli_init(void)
 	install_element(SEGMENT_ROUTING_NODE, &sr_no_traffic_eng_cmd);
 	install_element(SR_TRAFFIC_ENG_NODE, &srte_segment_list_cmd);
 	install_element(SR_TRAFFIC_ENG_NODE, &srte_no_segment_list_cmd);
-	install_element(SR_SEGMENT_LIST_NODE,
-			&srte_segment_list_segment_cmd);
-	install_element(SR_SEGMENT_LIST_NODE,
-			&srte_segment_list_no_segment_cmd);
+	install_element(SR_SEGMENT_LIST_NODE, &srte_segment_list_segment_cmd);
 	install_element(SR_TRAFFIC_ENG_NODE, &srte_policy_cmd);
 	install_element(SR_TRAFFIC_ENG_NODE, &srte_no_policy_cmd);
 	install_element(SR_POLICY_NODE, &srte_policy_name_cmd);

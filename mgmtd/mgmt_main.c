@@ -148,6 +148,14 @@ const struct frr_yang_module_info zebra_route_map_info = {
 	.nodes = { { .xpath = NULL } },
 };
 
+#ifdef HAVE_MGMTD_TESTC
+static const struct frr_yang_module_info frr_test_config_info = {
+	.name = "frr-test-config",
+	.ignore_cfg_cbs = true,
+	.nodes = { { .xpath = NULL } },
+};
+#endif
+
 /*
  * List of YANG modules to be loaded in the process context of
  * MGMTd.
@@ -184,6 +192,9 @@ static const struct frr_yang_module_info *const mgmt_yang_modules[] = {
 #endif
 #ifdef HAVE_STATICD
 	&frr_staticd_cli_info,
+#endif
+#ifdef HAVE_MGMTD_TESTC
+	&frr_test_config_info,
 #endif
 };
 

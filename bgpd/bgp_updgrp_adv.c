@@ -239,7 +239,7 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 			/* Send withdrawals without waiting for coalesting timer
 			 * to expire.
 			 */
-			if (subgrp->t_coalesce) {
+			if (event_is_scheduled(subgrp->t_coalesce)) {
 				subgrp_withdraw_stale_addpath(ctx, subgrp);
 
 				goto done;
@@ -261,7 +261,7 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 			/* Send withdrawals without waiting for coalesting timer
 			 * to expire.
 			 */
-			if (subgrp->t_coalesce) {
+			if (event_is_scheduled(subgrp->t_coalesce)) {
 				if (!ctx->pi || CHECK_FLAG(ctx->pi->flags, BGP_PATH_UNUSEABLE)) {
 					RB_FOREACH_SAFE (adj, bgp_adj_out_rb, &ctx->dest->adj_out,
 							 adj_next) {
@@ -405,7 +405,6 @@ static void subgroup_coalesce_timer(struct event *event)
 	frrtrace(3, frr_bgp, upd_announce_route_on_coalesce_timer_expiry,
 		 (SUBGRP_UPDGRP(subgrp))->id, subgrp->id, subgrp->v_coalesce);
 
-	subgrp->t_coalesce = NULL;
 	subgrp->v_coalesce = 0;
 	bgp = SUBGRP_INST(subgrp);
 	subgroup_announce_route(subgrp);
@@ -989,6 +988,7 @@ void subgroup_default_originate(struct update_subgroup *subgrp, bool withdraw)
 			attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL;
 	} else {
 		bgp_attr_set(&attr, BGP_ATTR_NEXT_HOP);
+		attr.mp_nexthop_len = IPV4_MAX_BYTELEN;
 	}
 
 	if (peer->default_rmap[afi][safi].name) {
@@ -1009,8 +1009,9 @@ void subgroup_default_originate(struct update_subgroup *subgrp, bool withdraw)
 
 			for (pi = bgp_dest_get_bgp_path_info(dest); pi;
 			     pi = pi->next) {
-				struct attr tmp_attr = attr;
+				struct attr tmp_attr;
 
+				bgp_attr_dup_into(&tmp_attr, &attr);
 				tmp_pi.attr = &tmp_attr;
 
 				new_ret = route_map_apply_ext(
@@ -1167,7 +1168,7 @@ void subgroup_announce_all(struct update_subgroup *subgrp)
 	/*
 	 * We should wait for the coalesce timer. Arm the timer if not done.
 	 */
-	if (!subgrp->t_coalesce) {
+	if (!event_is_scheduled(subgrp->t_coalesce)) {
 		event_add_timer_msec(bm->master, subgroup_coalesce_timer,
 				     subgrp, subgrp->v_coalesce,
 				     &subgrp->t_coalesce);

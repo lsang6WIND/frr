@@ -8,7 +8,7 @@
 
 #include "log.h"
 #include "stream.h"
-#include "sockunion.h"
+#include "sockopt.h"
 #include "command.h"
 #include "prefix.h"
 #include "frrevent.h"
@@ -792,7 +792,6 @@ static int bmp_mirror_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 {
 	struct bmp_bgp *bmpbgp;
 	struct timeval tv;
-	struct bmp_mirrorq *qitem = NULL;
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 	struct bgp *bgp_vrf;
@@ -812,17 +811,19 @@ static int bmp_mirror_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 		memcpy(bbpeer->open_rx, packet->data, size);
 	}
 
-
-	qitem = XCALLOC(MTYPE_BMP_MIRRORQ, sizeof(*qitem) + size);
-	qitem->peerid = peer->qobj_node.nid;
-	qitem->tv = tv;
-	qitem->len = size;
-	memcpy(qitem->data, packet->data, size);
-
+	/*
+	 * mirrorq is per-VRF (per bmp_bgp) and is shared by all targets
+	 * inside that VRF.  qitem->refcount tracks the number of sessions,
+	 * across all mirror-enabled matching targets in that VRF, that still
+	 * need to consume this packet.
+	 */
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
+		struct bmp_mirrorq *qitem = NULL;
+
 		bmpbgp = bmp_bgp_find(bgp_vrf);
 		if (!bmpbgp)
 			continue;
+
 		frr_each (bmp_targets, &bmpbgp->targets, bt) {
 			if (!bt->mirror)
 				continue;
@@ -838,24 +839,23 @@ static int bmp_mirror_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 					qitem->len = size;
 					memcpy(qitem->data, packet->data, size);
 				}
-
 				qitem->refcount++;
 				if (!bmp->mirrorpos)
 					bmp->mirrorpos = qitem;
 				pullwr_bump(bmp->pullwr);
 			}
-			if (qitem->refcount == 0)
-				continue;
-			bmpbgp->mirror_qsize += sizeof(*qitem) + size;
-			bmp_mirrorq_add_tail(&bmpbgp->mirrorq, qitem);
-
-			bmp_mirror_cull(bmpbgp);
-
-			bmpbgp->mirror_qsizemax = MAX(bmpbgp->mirror_qsizemax, bmpbgp->mirror_qsize);
 		}
+
+		if (!qitem)
+			continue;
+
+		bmpbgp->mirror_qsize += sizeof(*qitem) + size;
+		bmp_mirrorq_add_tail(&bmpbgp->mirrorq, qitem);
+
+		bmp_mirror_cull(bmpbgp);
+
+		bmpbgp->mirror_qsizemax = MAX(bmpbgp->mirror_qsizemax, bmpbgp->mirror_qsize);
 	}
-	if (qitem && qitem->refcount == 0)
-		XFREE(MTYPE_BMP_MIRRORQ, qitem);
 	return 0;
 }
 
@@ -1106,7 +1106,15 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 
 	bpacket_attr_vec_arr_reset(&vecarr);
 
-	s = stream_new(BGP_MAX_PACKET_SIZE);
+	/*
+	 * Use an expandable stream so that an oversized re-encoded UPDATE
+	 * (large unknown-transitive attribute plus route-map additions) does
+	 * not silently truncate via CHECK_SIZE or assert in stream_put_prefix.
+	 * The on-wire UPDATE inside a BMP Route-Monitoring message must still
+	 * fit BGP's 16-bit length field, so we drop the route if the encoded
+	 * size exceeds BGP_MAX_PACKET_SIZE.
+	 */
+	s = stream_new_expandable(BGP_MAX_PACKET_SIZE);
 	bgp_packet_set_marker(s, BGP_MSG_UPDATE);
 
 	/* 2: withdrawn routes length */
@@ -1116,11 +1124,13 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 	attrlen_pos = stream_get_endp(s);
 	stream_putw(s, 0);
 
-	/* 5: Encode all the attributes, except MP_REACH_NLRI attr. */
+	/* 5: Encode all the attributes, except MP_REACH_NLRI attr.
+	 * Pass for_bmp=true to bgp_packet_attribute() so it skips outbound
+	 * peer-specific AS_PATH transformations and emits attr->aspath as
+	 * stored — BMP is a reporting channel, not a BGP peer session.
+	 */
 	total_attr_len = bgp_packet_attribute(NULL, peer, s, attr, &vecarr, NULL, afi, safi, peer,
-					      NULL, NULL, 0, 0, 0, 0, NULL, NULL);
-
-	/* space check? */
+					      NULL, NULL, 0, 0, 0, 0, NULL, NULL, true);
 
 	/* peer_cap_enhe & add-path removed */
 	if (afi == AFI_IP && safi == SAFI_UNICAST)
@@ -1135,6 +1145,13 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 		bgp_packet_mpattr_prefix(s, afi, safi, p, prd, label, num_labels, 0, 0, attr, NULL);
 		bgp_packet_mpattr_end(s, mpattrlen_pos);
 		total_attr_len += stream_get_endp(s) - p1;
+	}
+
+	if (stream_get_endp(s) > BGP_MAX_PACKET_SIZE) {
+		zlog_warn("bmp: skipping route-monitoring for %pFX: re-encoded UPDATE exceeds %u bytes",
+			  p, BGP_MAX_PACKET_SIZE);
+		stream_free(s);
+		return NULL;
 	}
 
 	/* set the total attribute length correctly */
@@ -1152,7 +1169,7 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 	bgp_size_t total_attr_len = 0;
 	bgp_size_t unfeasible_len;
 
-	s = stream_new(BGP_MAX_PACKET_SIZE);
+	s = stream_new_expandable(BGP_MAX_PACKET_SIZE);
 
 	bgp_packet_set_marker(s, BGP_MSG_UPDATE);
 	stream_putw(s, 0);
@@ -1177,6 +1194,13 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 		/* Set total path attribute length. */
 		total_attr_len = stream_get_endp(s) - mp_start;
 		stream_putw_at(s, attrlen_pos, total_attr_len);
+	}
+
+	if (stream_get_endp(s) > BGP_MAX_PACKET_SIZE) {
+		zlog_warn("bmp: skipping route-monitoring withdraw for %pFX: encoded UPDATE exceeds %u bytes",
+			  p, BGP_MAX_PACKET_SIZE);
+		stream_free(s);
+		return NULL;
 	}
 
 	bgp_packet_set_size(s);
@@ -1207,6 +1231,9 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 				 num_labels);
 	else
 		msg = bmp_withdraw(p, prd, afi, safi);
+
+	if (!msg)
+		return;
 
 	hdr = stream_new(BGP_MAX_PACKET_SIZE);
 	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
@@ -1999,8 +2026,6 @@ static void bmp_read(struct event *t)
 	char buf[1024];
 	ssize_t n;
 
-	bmp->t_read = NULL;
-
 	n = read(bmp->socket, buf, sizeof(buf));
 	if (n >= 1) {
 		zlog_info("bmp[%s]: unexpectedly received %zu bytes", bmp->remote, n);
@@ -2213,7 +2238,7 @@ static void bmp_bgp_peer_vrf(struct bmp_bgp_peer *bbpeer, struct bgp *bgp)
 	else
 		local_as = peer->local_as;
 
-	s = bgp_open_make(peer, peer->connection, send_holdtime, local_as, &peer->local_id);
+	s = bgp_open_make(peer->connection, send_holdtime, local_as, &peer->local_id);
 	open_len = stream_get_endp(s);
 
 	bbpeer->open_rx_len = open_len;
@@ -2225,7 +2250,7 @@ static void bmp_bgp_peer_vrf(struct bmp_bgp_peer *bbpeer, struct bgp *bgp)
 	stream_free(s);
 
 	/* rfc9069#section-5.2 : Received OPEN Message: Repeat of the same sent OPEN message */
-	s = bgp_open_make(peer, peer->connection, send_holdtime, local_as, &peer->local_id);
+	s = bgp_open_make(peer->connection, send_holdtime, local_as, &peer->local_id);
 	open_len = stream_get_endp(s);
 	bbpeer->open_tx_len = open_len;
 	if (bbpeer->open_tx)
@@ -3260,7 +3285,7 @@ DEFPY(show_bmp,
 
 				uptime[0] = '\0';
 
-				if (ba->t_timer) {
+				if (event_is_scheduled(ba->t_timer)) {
 					long trem = event_timer_remain_second(
 						ba->t_timer);
 
@@ -3268,7 +3293,7 @@ DEFPY(show_bmp,
 						    uptime, sizeof(uptime),
 						    false, NULL);
 					state_str = "RetryWait";
-				} else if (ba->t_read) {
+				} else if (event_is_scheduled(ba->t_read)) {
 					state_str = "Connecting";
 				} else if (ba->resq.callback) {
 					state_str = "Resolving";
@@ -3300,12 +3325,12 @@ DEFPY(show_bmp,
 				peer_uptime(bmp->t_up.tv_sec, uptime,
 					    sizeof(uptime), false, NULL);
 
-				ttable_add_row(tt, "%s|%s|%Lu|%Lu|%Lu|%Lu|%zu|%zu",
-					       bmp->remote, uptime,
-					       bmp->cnt_update,
-					       bmp->cnt_mirror,
-					       bmp->cnt_mirror_overruns,
-					       total, q, kq);
+				ttable_add_row(tt,
+					       "%s|%s|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%" PRIu64
+					       "|%zu|%zu",
+					       bmp->remote, uptime, bmp->cnt_update,
+					       bmp->cnt_mirror, bmp->cnt_mirror_overruns, total, q,
+					       kq);
 			}
 			out = ttable_dump(tt, "\n");
 			vty_out(vty, "%s", out);

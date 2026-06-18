@@ -84,7 +84,7 @@ static int set_log_file(struct zlog_cfg_file *target, struct vty *vty, const cha
 void command_setup_early_logging(const char *dest, const char *level)
 {
 	int nlevel;
-	char *sep;
+	const char *sep;
 	int len;
 	char type[8];
 

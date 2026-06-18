@@ -1813,6 +1813,7 @@ static int ospf6_read_helper(int sockfd, struct ospf6 *ospf6)
 	enum ospf6_auth_err ret = OSPF6_AUTH_PROCESS_NORMAL;
 	uint32_t at_len = 0;
 	uint32_t lls_len = 0;
+	int hoplim = 0;
 
 	/* initialize */
 	memset(&src, 0, sizeof(src));
@@ -1824,7 +1825,7 @@ static int ospf6_read_helper(int sockfd, struct ospf6 *ospf6)
 	iovector[1].iov_len = 0;
 
 	/* receive message */
-	len = ospf6_recvmsg(&src, &dst, &ifindex, iovector, sockfd);
+	len = ospf6_recvmsg(&src, &dst, &ifindex, &hoplim, iovector, sockfd);
 	if (len < 0)
 		return OSPF6_READ_ERROR;
 
@@ -1832,6 +1833,10 @@ static int ospf6_read_helper(int sockfd, struct ospf6 *ospf6)
 		flog_err(EC_LIB_DEVELOPMENT, "Excess message read");
 		return OSPF6_READ_ERROR;
 	}
+
+	/* RFC5340:A.1 Ignore multicast with invalid hop limit */
+	if (IN6_IS_ADDR_MULTICAST(&dst) && hoplim != 1)
+		return OSPF6_READ_CONTINUE;
 
 	/* ensure some zeroes past the end, just as a security precaution */
 	memset(recvbuf + len, 0, MIN(128, iobuflen - len));

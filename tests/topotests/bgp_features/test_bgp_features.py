@@ -32,7 +32,7 @@ from lib.topolog import logger
 
 # Required to instantiate the topology builder class.
 
-pytestmark = [pytest.mark.bgpd, pytest.mark.ospfd]
+pytestmark = [pytest.mark.bgpd, pytest.mark.ospf6d, pytest.mark.ospfd]
 
 #####################################################
 #
@@ -776,7 +776,7 @@ def test_bgp_norib():
     logger.info("Checking BGP configuration for 'bgp no-rib'")
 
     norib_cfg = (
-        tgen.net["r1"].cmd('vtysh -c "show running bgpd" | grep "^bgp no-rib"').rstrip()
+        tgen.net["r1"].cmd('vtysh -c "show running" | grep "^bgp no-rib"').rstrip()
     )
 
     assertmsg = "'bgp no-rib' configuration applied, but not visible in configuration"
@@ -847,9 +847,7 @@ def test_bgp_disable_norib():
     logger.info("Checking BGP configuration for 'bgp no-rib'")
 
     norib_cfg = (
-        tgen.net["r1"]
-        .cmd('vtysh -c "show running bgpd" | grep "^ bgp no-rib"')
-        .rstrip()
+        tgen.net["r1"].cmd('vtysh -c "show running" | grep "^ bgp no-rib"').rstrip()
     )
 
     assertmsg = (

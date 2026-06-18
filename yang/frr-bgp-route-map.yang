@@ -7,6 +7,10 @@ module frr-bgp-route-map {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import frr-route-map {
     prefix frr-route-map;
   }
@@ -397,6 +401,12 @@ identity set-extcommunity-color {
       "Set EVPN gateway IP overlay index IPv6";
   }
 
+  identity set-extcommunity-evpn-rmac {
+    base frr-route-map:rmap-set-type;
+    description
+      "Set EVPN router MAC extended community";
+  }
+
   identity set-l3vpn-nexthop-encapsulation {
     base frr-route-map:rmap-set-type;
     description
@@ -682,7 +692,7 @@ identity set-extcommunity-color {
     }
 
     case rpki-extcommunity {
-      when "derived-from-or-self(/frr-route-map:lib/frr-route-map:route-map/frr-route-map:entry/frr-route-map:match-condition/frr-route-map:condition, 'frr-bgp-route-map:rpki-extcommunity')";
+      when "derived-from-or-self(../frr-route-map:condition, 'frr-bgp-route-map:rpki-extcommunity')";
       leaf rpki-extcommunity {
         type enumeration {
           enum "valid" {
@@ -1398,6 +1408,17 @@ identity set-extcommunity-color {
         type inet:ipv6-address;
         description
           "Specify the EVPN gateway IP overlay index IPv6 value";
+      }
+    }
+    case extcommunity-evpn-rmac {
+      when
+      "derived-from-or-self(../frr-route-map:action, 'frr-bgp-route-map:set-extcommunity-evpn-rmac')";
+      description
+        "Set EVPN router MAC extended community";
+      leaf extcommunity-evpn-rmac {
+        type yang:mac-address;
+        description
+          "Specify the EVPN router MAC value";
       }
     }
     case l3vpn-nexthop-encapsulation {

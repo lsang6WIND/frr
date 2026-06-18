@@ -389,13 +389,13 @@ int mgmt_be_adapter_send(struct mgmt_be_client_adapter *adapter, void *_msg)
 	uint64_t txn_id = msg->refer_id;
 	int ret;
 
-	_dbg("Sending %s to '%s' txn-id: %Lu", mgmt_msg_code_name(msg->code), adapter->name,
+	_dbg("Sending %s to '%s' txn-id: %" PRIu64, mgmt_msg_code_name(msg->code), adapter->name,
 	     txn_id);
 
 	ret = mgmt_msg_native_send_msg(adapter->conn, msg, false);
 	if (ret)
-		_log_err("Failed sending %s to '%s' txn-id: %Lu", mgmt_msg_code_name(msg->code),
-			 adapter->name, txn_id);
+		_log_err("Failed sending %s to '%s' txn-id: %" PRIu64,
+			 mgmt_msg_code_name(msg->code), adapter->name, txn_id);
 	return ret;
 }
 
@@ -525,7 +525,7 @@ static void be_adapter_process_msg(uint8_t version, uint8_t *data, size_t msg_le
 	 * function.
 	 */
 
-	_dbg("Got %s from '%s' txn-id %Lu", mgmt_msg_code_name(msg->code), adapter->name,
+	_dbg("Got %s from '%s' txn-id %" PRIu64, mgmt_msg_code_name(msg->code), adapter->name,
 	     msg->refer_id);
 
 	assert(adapter->id != MGMTD_BE_CLIENT_ID_MAX || msg->code == MGMT_MSG_CODE_SUBSCRIBE);
@@ -546,9 +546,21 @@ static void be_adapter_process_msg(uint8_t version, uint8_t *data, size_t msg_le
 	case MGMT_MSG_CODE_CFG_REPLY:
 		mgmt_txn_handle_cfg_reply(msg->refer_id, adapter);
 		return;
-	case MGMT_MSG_CODE_CFG_APPLY_REPLY:
-		mgmt_txn_handle_cfg_apply_reply(msg->refer_id, adapter);
+	case MGMT_MSG_CODE_CFG_APPLY_REPLY: {
+		const char *errmsg = NULL;
+
+		if (msg_len > sizeof(struct mgmt_msg_cfg_apply_reply)) {
+			if (!MGMT_MSG_VALIDATE_NUL_TERM((struct mgmt_msg_cfg_apply_reply *)msg,
+							msg_len)) {
+				_log_err("Corrupt CFG_APPLY_REPLY from adapter %s", adapter->name);
+				msg_conn_disconnect(adapter->conn, false);
+				return;
+			}
+			errmsg = (const char *)(msg + 1);
+		}
+		mgmt_txn_handle_cfg_apply_reply(msg->refer_id, adapter, errmsg);
 		return;
+	}
 	case MGMT_MSG_CODE_ERROR:
 		error_msg = (typeof(error_msg))msg;
 		mgmt_txn_handle_error_reply(adapter, msg->refer_id, msg->req_id, error_msg->error,
@@ -587,10 +599,10 @@ void mgmt_be_adapter_status_write(struct vty *vty)
 		vty_out(vty, "  Client: \t\t\t%s\n", adapter->name);
 		vty_out(vty, "    Conn-FD: \t\t\t%d\n", adapter->conn->fd);
 		vty_out(vty, "    Client-Id: \t\t\t%d\n", adapter->id);
-		vty_out(vty, "    Msg-Recvd: \t\t\t%Lu\n", adapter->conn->mstate.nrxm);
-		vty_out(vty, "    Bytes-Recvd: \t\t%Lu\n", adapter->conn->mstate.nrxb);
-		vty_out(vty, "    Msg-Sent: \t\t\t%Lu\n", adapter->conn->mstate.ntxm);
-		vty_out(vty, "    Bytes-Sent: \t\t%Lu\n", adapter->conn->mstate.ntxb);
+		vty_out(vty, "    Msg-Recvd: \t\t\t%" PRIu64 "\n", adapter->conn->mstate.nrxm);
+		vty_out(vty, "    Bytes-Recvd: \t\t%" PRIu64 "\n", adapter->conn->mstate.nrxb);
+		vty_out(vty, "    Msg-Sent: \t\t\t%" PRIu64 "\n", adapter->conn->mstate.ntxm);
+		vty_out(vty, "    Bytes-Sent: \t\t%" PRIu64 "\n", adapter->conn->mstate.ntxb);
 		count++;
 	}
 	vty_out(vty, "  Total: %u\n", count);

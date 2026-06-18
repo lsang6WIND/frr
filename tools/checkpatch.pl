@@ -2610,18 +2610,21 @@ sub exclude_global_initialisers {
 }
 
 sub remove_defuns {
-    my @breakfast = ();
-    my $milktoast;
-    for my $tasty (@rawlines) {
-        $milktoast = $tasty;
-        if (($tasty =~ /^\+DEFPY/ ||
-             $tasty =~ /^\+DEFUN/ ||
-             $tasty =~ /^\+ALIAS/) .. ($tasty =~ /^\+\{/)) {
-            $milktoast = "\n";
-        }
-        push(@breakfast, $milktoast);
-    }
-    @rawlines = @breakfast;
+	my $zap_it = 0;
+
+	for (my $i = 0; $i < scalar @rawlines; $i++) {
+		my $rawline = $rawlines[$i];
+
+		$zap_it = 1 if ($rawline =~ /^\+DEFPY/ ||
+				$rawline =~ /^\+DEFUN/ ||
+				$rawline =~ /^\+ALIAS/);
+		$zap_it = 0 if ($rawline =~ /^\+\{/ ||
+				$rawline =~ /^\+\+\+/ ||
+				$rawline =~ /^\+\s*$/);
+		if ($zap_it) {
+			$rawlines[$i] = "\n";
+		}
+	}
 }
 
 sub process {
@@ -6291,14 +6294,13 @@ sub process {
 		while ($line =~ /(?:^|")([X\t]*)(?:"|$)/g) {
 			my $string = substr($rawline, $-[1], $+[1] - $-[1]);
 			$string =~ s/%%/__/g;
-                        # check for %L
-                        # OK in FRR
-                        # if ($show_L && $string =~ /%[\*\d\.\$]*L([diouxX])/) {
-                        #       WARN("PRINTF_L",
-                        #            "\%L$1 is non-standard C, use %ll$1\n" . $herecurr);
-                        #       $show_L = 0;
-                        # }
-                        # check for %Z
+			# check for %L
+			if ($show_L && $string =~ /%[\*\d\.\$]*L([diouxX])/) {
+				WARN("PRINTF_L",
+				     "\%L$1 is non-standard C, use %ll$1\n" . $herecurr);
+				$show_L = 0;
+			}
+			# check for %Z
 			if ($show_Z && $string =~ /%[\*\d\.\$]*Z([diouxX])/) {
 				WARN("PRINTF_Z",
 				     "%Z$1 is non-standard C, use %z$1\n" . $herecurr);

@@ -56,6 +56,7 @@
 #include "bgpd/bgp_community.h"
 #include "bgpd/bgp_lcommunity.h"
 #include "bgpd/bgp_srv6.h"
+#include "bgpd/bgp_ls.h"
 #include "bgpd/bgp_ls_ted.h"
 
 /* All information about zebra. */
@@ -528,6 +529,8 @@ static int zebra_read_route(ZAPI_CALLBACK_ARGS)
 	struct zapi_route api;
 	union g_addr nexthop = {};
 	ifindex_t ifindex = IFINDEX_INTERNAL;
+	uint32_t seg6local_action = ZEBRA_SEG6_LOCAL_ACTION_UNSPEC;
+	const struct seg6local_context *seg6local_ctx = NULL;
 	int add, i;
 	struct bgp *bgp;
 
@@ -562,6 +565,9 @@ static int zebra_read_route(ZAPI_CALLBACK_ARGS)
 		} else
 			nexthop = api.nexthops[0].gate;
 
+		seg6local_action = api.nexthops[0].seg6local_action;
+		seg6local_ctx = &api.nexthops[0].seg6local_ctx;
+
 		/*
 		 * The ADD message is actually an UPDATE and there is no
 		 * explicit DEL
@@ -578,9 +584,9 @@ static int zebra_read_route(ZAPI_CALLBACK_ARGS)
 		}
 
 		/* Now perform the add/update. */
-		bgp_redistribute_add(bgp, &api.prefix, &nexthop, ifindex,
-				     nhtype, api.distance, bhtype, api.metric,
-				     api.type, api.instance, api.tag);
+		bgp_redistribute_add(bgp, &api.prefix, &nexthop, ifindex, nhtype, api.distance,
+				     bhtype, api.metric, api.type, api.instance, api.tag,
+				     seg6local_action, seg6local_ctx);
 	} else {
 		bgp_redistribute_delete(bgp, &api.prefix, api.type,
 					api.instance);
@@ -1024,6 +1030,7 @@ static bool bgp_table_map_apply(struct route_map *map, const struct prefix *p,
 
 	ret = route_map_apply(map, p, path);
 	bgp_attr_flush(path->attr);
+	bgp_attr_extra_discard(path->attr);
 
 	if (ret != RMAP_DENYMATCH)
 		return true;
@@ -1261,13 +1268,15 @@ static bool update_ipv6nh_for_route_install(int nh_othervrf, struct bgp *nh_bgp,
 	return true;
 }
 
-static bool bgp_zebra_use_nhop_weighted(struct bgp *bgp, struct attr *attr,
+static bool bgp_zebra_use_nhop_weighted(struct bgp *bgp, struct bgp_path_info *bpi,
 					uint64_t *nh_weight)
 {
 	/* zero link-bandwidth and link-bandwidth not present are treated
 	 * as the same situation.
 	 */
-	if (!attr->link_bw) {
+	uint64_t link_bw = bgp_path_info_get_link_bw(bpi);
+
+	if (!link_bw) {
 		/* the only situations should be if we're either told
 		 * to skip or use default weight.
 		 */
@@ -1275,7 +1284,7 @@ static bool bgp_zebra_use_nhop_weighted(struct bgp *bgp, struct attr *attr,
 			return false;
 		*nh_weight = BGP_ZEBRA_DEFAULT_NHOP_WEIGHT;
 	} else
-		*nh_weight = attr->link_bw;
+		*nh_weight = link_bw;
 
 	return true;
 }
@@ -1346,19 +1355,7 @@ static void bgp_zebra_announce_parse_nexthop(struct bgp_path_info *info, const s
 		 * in some situations.
 		 */
 		if (do_wt_ecmp == BGP_WECMP_BEHAVIOR_LINK_BW) {
-			/* Extended communities are exported/imported correctly
-			 * between VRFs, but we need to extract the actual link-bandwidth
-			 * value from the extended communities.
-			 */
-			(void)ecommunity_linkbw_present(bgp_attr_get_ecommunity(mpinfo->attr),
-							&mpinfo->attr->link_bw);
-			/* Fallback to IPv6 address-specific extended community */
-			if (!mpinfo->attr->link_bw)
-				(void)ecommunity_linkbw_present(bgp_attr_get_ipv6_ecommunity(
-									mpinfo->attr),
-								&mpinfo->attr->link_bw);
-			if (!bgp_zebra_use_nhop_weighted(bgp, mpinfo->attr,
-							 &nh_weight))
+			if (!bgp_zebra_use_nhop_weighted(bgp, mpinfo, &nh_weight))
 				continue;
 		} else if (do_wt_ecmp == BGP_WECMP_BEHAVIOR_NNHN_COUNT) {
 			if (bgp_attr_exists(mpinfo->attr, BGP_ATTR_NHC))
@@ -1368,7 +1365,7 @@ static void bgp_zebra_announce_parse_nexthop(struct bgp_path_info *info, const s
 
 		zapi_nexthop_init(api_nh);
 
-		api_nh->srte_color = bgp_attr_get_color(info->attr);
+		api_nh->srte_color = bgp_path_info_get_srte_color(info);
 
 		if (bgp_debug_zebra(&api->prefix)) {
 			if (BGP_PATH_INFO_NUM_LABELS(mpinfo)) {
@@ -1384,7 +1381,7 @@ static void bgp_zebra_announce_parse_nexthop(struct bgp_path_info *info, const s
 		if (bgp->table_map[afi][safi].name) {
 			/* Copy info and attributes, so the route-map
 			   apply doesn't modify the BGP route info. */
-			local_attr = *mpinfo->attr;
+			bgp_attr_dup_into(&local_attr, mpinfo->attr);
 			mpinfo_cp->attr = &local_attr;
 			if (!bgp_table_map_apply(bgp->table_map[afi][safi].map,
 						 p, mpinfo_cp))
@@ -1484,21 +1481,23 @@ static void bgp_zebra_announce_parse_nexthop(struct bgp_path_info *info, const s
 
 		api_nh->weight = nh_weight;
 
-		if (((mpinfo->attr->srv6_l3service &&
-		      !sid_zero_ipv6(&mpinfo->attr->srv6_l3service->sid)) ||
-		     (mpinfo->attr->srv6_vpn && !sid_zero_ipv6(&mpinfo->attr->srv6_vpn->sid))) &&
+		struct bgp_attr_srv6_vpn *vpn_tmp = bgp_attr_get_srv6_vpn(mpinfo->attr);
+		struct bgp_attr_srv6_l3service *srv6_l3service =
+			bgp_attr_get_srv6_l3service(mpinfo->attr);
+
+		if (((srv6_l3service && !sid_zero_ipv6(&srv6_l3service->sid)) ||
+		     (vpn_tmp && !sid_zero_ipv6(&vpn_tmp->sid))) &&
 		    !is_evpn) {
-			struct in6_addr *sid_tmp = mpinfo->attr->srv6_l3service
-							   ? (&mpinfo->attr->srv6_l3service->sid)
-							   : (&mpinfo->attr->srv6_vpn->sid);
+			struct in6_addr *sid_tmp = srv6_l3service ? (&srv6_l3service->sid)
+								  : (&vpn_tmp->sid);
 
 			memcpy(&api_nh->seg6_segs[0], sid_tmp,
 			       sizeof(api_nh->seg6_segs[0]));
 			api_nh->srv6_encap_behavior = bgp_orig->srv6_encap_behavior;
 
-			if (mpinfo->attr->srv6_l3service && labels && (num_labels > 0) &&
+			if (srv6_l3service && labels && (num_labels > 0) &&
 			    bgp_is_valid_label(&labels[0]) &&
-			    mpinfo->attr->srv6_l3service->transposition_len != 0) {
+			    srv6_l3service->transposition_len != 0) {
 				mpls_lse_decode(labels[0], &nh_label, &ttl,
 						&exp, &bos);
 
@@ -1510,8 +1509,8 @@ static void bgp_zebra_announce_parse_nexthop(struct bgp_path_info *info, const s
 				}
 
 				transpose_sid(&api_nh->seg6_segs[0], nh_label,
-					      mpinfo->attr->srv6_l3service->transposition_offset,
-					      mpinfo->attr->srv6_l3service->transposition_len,
+					      srv6_l3service->transposition_offset,
+					      srv6_l3service->transposition_len,
 					      BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL);
 			}
 
@@ -1531,7 +1530,7 @@ static void bgp_debug_zebra_nh(struct zapi_route *api)
 	char eth_buf[ETHER_ADDR_STRLEN + 7] = { '\0' };
 	char buf1[ETHER_ADDR_STRLEN];
 	/* strlen("label ") + 8 chars per label + '/' or '\0' for each label */
-	char label_buf[6 + 9 * BGP_MAX_LABELS];
+	char label_buf[6 + BGP_MAX_LABEL_DIGITS];
 	char sid_buf[20];
 	char segs_buf[256];
 	struct zapi_nexthop *api_nh;
@@ -1657,7 +1656,7 @@ enum zclient_send_status bgp_zebra_announce_actual(struct bgp_dest *dest,
 		api.tableid = info->attr->rmap_table_id;
 	}
 
-	if (info->attr->srte_color)
+	if (info->extra && info->extra->srte_color)
 		SET_FLAG(api.message, ZAPI_MESSAGE_SRTE);
 
 	/* Metric is currently based on the best-path only */
@@ -1680,13 +1679,12 @@ enum zclient_send_status bgp_zebra_announce_actual(struct bgp_dest *dest,
 		strlcpy(bzo.aspath, info->attr->aspath->str,
 			sizeof(bzo.aspath));
 
-		if (info->attr->flag & ATTR_FLAG_BIT(BGP_ATTR_COMMUNITIES))
+		if (bgp_attr_exists(info->attr, BGP_ATTR_COMMUNITIES))
 			strlcpy(bzo.community,
 				bgp_attr_get_community(info->attr)->str,
 				sizeof(bzo.community));
 
-		if (info->attr->flag
-		    & ATTR_FLAG_BIT(BGP_ATTR_LARGE_COMMUNITIES))
+		if (bgp_attr_exists(info->attr, BGP_ATTR_LARGE_COMMUNITIES))
 			strlcpy(bzo.lcommunity,
 				bgp_attr_get_lcommunity(info->attr)->str,
 				sizeof(bzo.lcommunity));
@@ -1766,8 +1764,10 @@ void bgp_zebra_announce_table(struct bgp *bgp, afi_t afi, safi_t safi)
 				bool is_add = true;
 
 				if (bgp->table_map[afi][safi].name) {
-					struct attr local_attr = *pi->attr;
+					struct attr local_attr;
 					struct bgp_path_info local_info = *pi;
+
+					bgp_attr_dup_into(&local_attr, pi->attr);
 
 					local_info.attr = &local_attr;
 
@@ -2045,6 +2045,8 @@ void bgp_zebra_route_install(struct bgp_dest *dest, struct bgp_path_info *info,
 	table = bgp_dest_table(dest);
 	if (table && table->afi == AFI_L2VPN && table->safi == SAFI_EVPN)
 		is_evpn = true;
+	else if (CHECK_FLAG(info->flags, BGP_PATH_LOCAL_IMPORT_EVPN_RT2_MACIP))
+		return;
 
 	/*
 	 * BGP is installing this route and bgp has been configured
@@ -2362,7 +2364,7 @@ bool bgp_redistribute_metric_set(struct bgp *bgp, struct bgp_redist *red,
 				struct attr *old_attr;
 				struct attr new_attr;
 
-				new_attr = *pi->attr;
+				bgp_attr_dup_into(&new_attr, pi->attr);
 				new_attr.med = red->redist_metric;
 				old_attr = pi->attr;
 				pi->attr = bgp_attr_intern(&new_attr);
@@ -2527,9 +2529,12 @@ void bgp_zebra_update_srv6_encap_routes(struct bgp *bgp, afi_t afi, struct bgp *
 			if (!CHECK_FLAG(pi->flags, BGP_PATH_SELECTED) || pi->type != ZEBRA_ROUTE_BGP)
 				continue;
 
-			if ((pi->attr->srv6_l3service &&
-			     !sid_zero_ipv6(&pi->attr->srv6_l3service->sid)) ||
-			    (pi->attr->srv6_vpn && !sid_zero_ipv6(&pi->attr->srv6_vpn->sid)))
+			struct bgp_attr_srv6_vpn *vpn = bgp_attr_get_srv6_vpn(pi->attr);
+			struct bgp_attr_srv6_l3service *srv6_l3service =
+				bgp_attr_get_srv6_l3service(pi->attr);
+
+			if ((srv6_l3service && !sid_zero_ipv6(&srv6_l3service->sid)) ||
+			    (vpn && !sid_zero_ipv6(&vpn->sid)))
 				bgp_zebra_route_install(dest, pi, bgp, add, NULL, false);
 		}
 	}
@@ -2561,7 +2566,9 @@ void bgp_zebra_instance_register(struct bgp *bgp)
 	 * Request SRv6 locator information from Zebra, if SRv6 is enabled
 	 * and a locator is configured for this BGP instance.
 	 */
-	if (bgp_srv6_locator_is_configured(bgp) && !bgp_srv6_locator_lookup(NULL, bgp))
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
+		bgp_zebra_srv6_manager_get_locator(NULL);
+	else if (bgp_srv6_locator_is_configured(bgp) && !bgp_srv6_locator_lookup(NULL, bgp))
 		bgp_zebra_srv6_manager_get_locator(bgp->srv6_locator_name);
 }
 
@@ -3086,12 +3093,15 @@ static int bgp_zebra_route_notify_owner(int command, struct zclient *zclient,
 			zlog_debug("route %pBD : INSTALLED", dest);
 		/* Find the best route */
 		for (pi = dest->info; pi; pi = pi->next) {
-			/* Process aggregate route */
-			bgp_aggregate_increment(bgp, &p, pi, afi, safi);
 			if (CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
 				new_select = pi;
 		}
-		/* Advertise the route */
+		/* Advertise the route.
+		 * Note: do NOT call bgp_aggregate_increment() here.
+		 * The increment already happened in bgp_update() before
+		 * bgp_process() was queued; calling it again here would
+		 * double-count the route in aggregate->count.
+		 */
 		if (new_select)
 			group_announce_route(bgp, afi, safi, dest, new_select);
 		else {
@@ -3136,13 +3146,18 @@ static int bgp_zebra_route_notify_owner(int command, struct zclient *zclient,
 		UNSET_FLAG(dest->flags, BGP_NODE_FIB_INSTALL_PENDING);
 		UNSET_FLAG(dest->flags, BGP_NODE_FIB_INSTALLED);
 		for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
-			bgp_aggregate_decrement(bgp, &p, pi, afi, safi);
 			if (CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
 				new_select = pi;
 		}
 		if (new_select)
 			group_announce_route(bgp, afi, safi, dest, new_select);
-		/* No action required */
+		/* Note: do NOT call bgp_aggregate_decrement() here.  The BGP
+		 * path is still present in the RIB with BGP_PATH_VALID set;
+		 * only the FIB lost to a better admin-distance route.
+		 * Aggregate counting tracks BGP RIB presence, not FIB state.
+		 * Decrementing here would underflow the count when the route is
+		 * later properly withdrawn via bgp_rib_remove().
+		 */
 		break;
 	case ZAPI_ROUTE_REMOVE_FAIL:
 		zlog_warn("%s: Route %pBD failure to remove", __func__, dest);
@@ -3759,7 +3774,7 @@ static int bgp_zebra_srv6_sid_notify(ZAPI_CALLBACK_ARGS)
 	struct prefix_ipv6 tmp_prefix;
 	uint32_t sid_func, sid_wide_func = 0;
 	bool found = false;
-	char *loc_name;
+	char loc_name[SRV6_LOCNAME_SIZE];
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp_srv6_locator_is_configured(bgp))
@@ -3780,7 +3795,7 @@ static int bgp_zebra_srv6_sid_notify(ZAPI_CALLBACK_ARGS)
 
 	/* Decode the received notification message */
 	if (!zapi_srv6_sid_notify_decode(zclient->ibuf, &ctx, &sid_addr, &sid_func, &sid_wide_func,
-					 &note, &loc_name)) {
+					 &note, loc_name, sizeof(loc_name))) {
 		zlog_err("%s : error in msg decode", __func__);
 		return -1;
 	}
@@ -3827,7 +3842,9 @@ static int bgp_zebra_srv6_sid_notify(ZAPI_CALLBACK_ARGS)
 			zlog_debug("SRv6 SID %pI6 %s : ALLOCATED", &sid_addr,
 				   srv6_sid_ctx2str(buf, sizeof(buf), &ctx));
 
-		if (!strmatch(locator_bgp->name, loc_name)) {
+		if (!strmatch(locator_bgp->name, loc_name) ||
+		    (bgp_vrf->srv6_locator_name[0] != '\0' &&
+		     !strmatch(bgp_vrf->srv6_locator_name, loc_name))) {
 			if (BGP_DEBUG(zebra, ZEBRA))
 				zlog_debug("%s(%d): %s, SRv6 Locator name unmatch %s:%s, releasing SID.",
 					   bgp->name_pretty, bgp->vrf_id, __func__,
@@ -4239,6 +4256,8 @@ static int bgp_zebra_process_srv6_locator_add(ZAPI_CALLBACK_ARGS)
 	if (zapi_srv6_locator_decode(zclient->ibuf, &loc) < 0)
 		return -1;
 
+	bgp_ls_originate_srv6_locator_prefix(bgp_get_default(), &loc);
+
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp_srv6_locator_is_configured(bgp))
 			continue;
@@ -4255,7 +4274,10 @@ static void bgp_zebra_process_srv6_locator_delete_per_bgp(struct srv6_locator *l
 	struct bgp_srv6_function *func;
 	struct bgp *bgp_vrf;
 	struct in6_addr *tovpn_sid;
+	struct in6_addr *unicast_sid;
 	struct prefix_ipv6 tmp_prefix;
+	struct srv6_locator *sid_locator;
+	afi_t afi;
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
 		if (bgp_vrf->inst_type != BGP_INSTANCE_TYPE_VRF)
@@ -4370,6 +4392,27 @@ static void bgp_zebra_process_srv6_locator_delete_per_bgp(struct srv6_locator *l
 		}
 	}
 
+	/* Clear SRv6 unicast SIDs */
+	for (afi = AFI_IP; afi <= AFI_IP6; afi++) {
+		unicast_sid = bgp->srv6_unicast[afi].sid;
+		sid_locator = bgp->srv6_unicast[afi].sid_locator;
+		if (!unicast_sid || !sid_locator)
+			continue;
+		if (!strmatch(sid_locator->name, loc->name))
+			continue;
+		tmp_prefix.family = AF_INET6;
+		tmp_prefix.prefixlen = IPV6_MAX_BITLEN;
+		tmp_prefix.prefix = *unicast_sid;
+		if (!prefix_match((struct prefix *)&loc->prefix, (struct prefix *)&tmp_prefix))
+			continue;
+		bgp_srv6_unicast_withdraw(bgp, afi);
+		bgp_srv6_unicast_sid_withdraw(bgp, afi);
+		srv6_locator_free(bgp->srv6_unicast[afi].sid_locator);
+		bgp->srv6_unicast[afi].sid_locator = NULL;
+		sid_unregister(bgp, bgp->srv6_unicast[afi].sid);
+		XFREE(MTYPE_BGP_SRV6_SID, bgp->srv6_unicast[afi].sid);
+	}
+
 	// clear SRv6 locator
 	if (bgp->srv6_locator) {
 		srv6_locator_free(bgp->srv6_locator);
@@ -4388,6 +4431,8 @@ static int bgp_zebra_process_srv6_locator_delete(ZAPI_CALLBACK_ARGS)
 
 	if (zapi_srv6_locator_decode(zclient->ibuf, &loc) < 0)
 		return -1;
+
+	bgp_ls_withdraw_srv6_locator_prefix(bgp_get_default(), &loc);
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp->srv6_locator)
@@ -4873,7 +4918,7 @@ int bgp_zebra_send_capabilities(struct bgp *bgp, bool disable)
 
 
 	/* Check if the client is connected */
-	if ((bgp_zclient->sock < 0) || (bgp_zclient->t_connect)) {
+	if ((bgp_zclient->sock < 0) || event_is_scheduled(bgp_zclient->t_connect)) {
 		if (BGP_DEBUG(zebra, ZEBRA) || BGP_DEBUG(graceful_restart, GRACEFUL_RESTART))
 			zlog_debug("%s: %s client not connected", __func__,
 				   bgp->name_pretty);
@@ -4952,7 +4997,7 @@ int bgp_zebra_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	}
 
 	/* Check if the client is connected */
-	if ((bgp_zclient->sock < 0) || (bgp_zclient->t_connect)) {
+	if ((bgp_zclient->sock < 0) || event_is_scheduled(bgp_zclient->t_connect)) {
 		if (BGP_DEBUG(zebra, ZEBRA))
 			zlog_debug("%s: %s client not connected", __func__,
 				   bgp->name_pretty);
@@ -4995,7 +5040,7 @@ int bgp_zebra_stale_timer_update(struct bgp *bgp)
 	}
 
 	/* Check if the client is connected */
-	if ((bgp_zclient->sock < 0) || (bgp_zclient->t_connect)) {
+	if ((bgp_zclient->sock < 0) || event_is_scheduled(bgp_zclient->t_connect)) {
 		if (BGP_DEBUG(zebra, ZEBRA))
 			zlog_debug("%s: %s client not connected", __func__,
 				   bgp->name_pretty);
@@ -5035,9 +5080,6 @@ int bgp_zebra_srv6_manager_release_locator_chunk(const char *name)
  */
 int bgp_zebra_srv6_manager_get_locator(const char *name)
 {
-	if (!name)
-		return -1;
-
 	/*
 	 * Send the Get Locator request to the SRv6 Manager and return the
 	 * result

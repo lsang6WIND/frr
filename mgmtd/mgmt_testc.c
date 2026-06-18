@@ -21,6 +21,8 @@
 
 static void async_notification(struct nb_cb_notify_args *args);
 static int rpc_callback(struct nb_cb_rpc_args *args);
+static int test_config_modify(struct nb_cb_modify_args *args);
+static int test_config_destroy(struct nb_cb_destroy_args *args);
 
 static void sigusr1(void);
 static void sigint(void);
@@ -151,11 +153,26 @@ static const struct frr_yang_module_info frr_zebra_info = {
 	}
 };
 
+static const struct frr_yang_module_info frr_test_config_info = {
+	.name = "frr-test-config",
+	.nodes = {
+		{
+			.xpath = "/frr-test-config:frr-test-config/test-value",
+			.cbs.modify = test_config_modify,
+			.cbs.destroy = test_config_destroy,
+		},
+		{
+			.xpath = NULL,
+		}
+	}
+};
+
 static const struct frr_yang_module_info *const mgmt_yang_modules[] = {
 	&frr_backend_info,
 	&frr_if_info,
 	&frr_ripd_info,
 	&frr_routing_info,
+	&frr_test_config_info,
 	&frr_vrf_info,
 	&frr_zebra_info,
 };
@@ -176,6 +193,7 @@ FRR_DAEMON_INFO(mgmtd_testc, MGMTD_TESTC,
 	);
 /* clang-format on */
 
+const char **_config_xpaths;
 const char **_notif_xpaths;
 const char **_rpc_xpaths;
 const char **_oper_xpaths;
@@ -202,7 +220,7 @@ static FRR_NORETURN void quit(int exit_code)
 	mgmt_be_client_destroy(mgmt_be_client);
 
 	event_cancel(&event_timeout);
-	darr_free(_client_cbs.config_xpaths);
+	darr_free(_config_xpaths);
 	darr_free(_client_cbs.oper_xpaths);
 	darr_free(_client_cbs.notify_xpaths);
 	darr_free(_client_cbs.rpc_xpaths);
@@ -322,6 +340,28 @@ static void async_notification(struct nb_cb_notify_args *args)
 		_notification(args);
 }
 
+static int test_config_modify(struct nb_cb_modify_args *args)
+{
+	const char *value;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	value = yang_dnode_get_string(args->dnode, NULL);
+	snprintf(args->errmsg, args->errmsg_len, "test-value set to '%s'", value);
+
+	return NB_OK;
+}
+
+static int test_config_destroy(struct nb_cb_destroy_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	snprintf(args->errmsg, args->errmsg_len, "test-value deleted");
+	return NB_OK;
+}
+
 static int rpc_callback(struct nb_cb_rpc_args *args)
 {
 	const char *vrf = NULL;
@@ -398,6 +438,10 @@ int main(int argc, char **argv)
 		_client_cbs.notify_xpaths = _notif_xpaths;
 		_client_cbs.nnotify_xpaths = darr_len(_notif_xpaths);
 	}
+
+	darr_push(_config_xpaths, "/frr-test-config:frr-test-config");
+	_client_cbs.config_xpaths = _config_xpaths;
+	_client_cbs.nconfig_xpaths = darr_len(_config_xpaths);
 
 	darr_push(_oper_xpaths, "/frr-backend:clients");
 	_client_cbs.oper_xpaths = _oper_xpaths;

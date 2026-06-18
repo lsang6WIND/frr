@@ -1028,10 +1028,17 @@ int ospf_distribute_check_connected(struct ospf *ospf, struct external_info *ei)
 	struct listnode *node;
 	struct ospf_interface *oi;
 
+	for (ALL_LIST_ELEMENTS_RO(ospf->oiflist, node, oi)) {
+		struct prefix address;
 
-	for (ALL_LIST_ELEMENTS_RO(ospf->oiflist, node, oi))
-		if (prefix_match(oi->address, (struct prefix *)&ei->p))
+		/* Clean up the address by removing the mask part */
+		prefix_copy(&address, oi->address);
+		apply_mask(&address);
+
+		if (prefix_same(&address, (struct prefix *)&ei->p))
 			return 0;
+	}
+
 	return 1;
 }
 
@@ -1383,7 +1390,8 @@ static int ospf_zebra_read_route(ZAPI_CALLBACK_ARGS)
 			/* Nothing has changed, so nothing to do; return */
 			return 0;
 		}
-		if (ospf->router_id.s_addr != INADDR_ANY) {
+		if (ospf->router_id.s_addr != INADDR_ANY &&
+		    !CHECK_FLAG(ospf->config, OSPF_SHUTDOWN)) {
 			if (is_default_prefix4(&p)) {
 				if (ei)
 					ei->default_always = false;
@@ -1633,8 +1641,6 @@ static void ospf_distribute_list_update_timer(struct event *event)
 
 	if (ospf == NULL)
 		return;
-
-	ospf->t_distribute_update = NULL;
 
 	zlog_info("Zebra[Redistribute]: vrf: %s distribute-list update timer fired!",
 		  ospf_vrf_id_to_name(ospf->vrf_id));

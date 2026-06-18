@@ -572,6 +572,137 @@ def test_bgp_explicit_ll_nht_no_orphan_on_peer_delete():
     )
 
 
+def test_bgp_global_peer_ll_nexthop_nht_wrong_interface():
+    """
+    Bug: When a BGP peer is configured with a global IPv6 address
+    (e.g. IXIA/traffic-generator) and advertises routes with a
+    link-local nexthop, bgp_find_or_add_nexthop() registers the
+    NHT with ifindex=0 (no interface scope) because conf_if is NULL.
+    Zebra resolves the LL nexthop against fe80::/64 on an arbitrary
+    interface. If that interface goes down, the nexthop is falsely
+    marked unreachable and all routes using it are withdrawn.
+
+    Topology (reuses existing r1, r2, r3):
+      r2 (spine) ---[r1-eth0]--- r1 (leaf) ---[r1-eth1]--- r3 (ixia)
+                     LL peer                   global peer
+                                               (LL nexthop via route-map)
+
+    Both r1-eth0 and r1-eth1 have fe80:1::/64, so NHT for r3's LL
+    nexthop can resolve through either interface.
+    """
+    tgen = get_topogen()
+
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    r1 = tgen.gears["r1"]
+    r3 = tgen.gears["r3"]
+
+    # --- Setup ---
+
+    step("Configure global addresses for r1-eth1 and r3-eth0")
+    r1.vtysh_cmd(
+        """
+        configure terminal
+         interface r1-eth1
+          ipv6 address 2001:db8:2::1/64
+         exit
+        end
+    """
+    )
+
+    r3.vtysh_cmd(
+        """
+        configure terminal
+         interface r3-eth0
+          ipv6 address 2001:db8:2::3/64
+         exit
+         interface lo
+          ip address 10.0.0.3/32
+          ipv6 address 2001:db8:3::1/128
+         exit
+        end
+    """
+    )
+
+    step("Configure r3: add router-id, route-map to set LL nexthop, global peer to r1")
+    r3.vtysh_cmd(
+        """
+        configure terminal
+         route-map SET_LL_NH permit 10
+          set ipv6 next-hop local fe80:1::4
+         exit
+         router bgp 65003
+          bgp router-id 10.0.0.3
+          neighbor 2001:db8:2::1 remote-as external
+          neighbor 2001:db8:2::1 timers 3 10
+          address-family ipv6 unicast
+           neighbor 2001:db8:2::1 activate
+           neighbor 2001:db8:2::1 route-map SET_LL_NH out
+           network 2001:db8:3::1/128
+          exit-address-family
+         exit
+        end
+    """
+    )
+
+    step("Configure r1: add global-address peer to r3")
+    r1.vtysh_cmd(
+        """
+        configure terminal
+         router bgp 65001
+          neighbor 2001:db8:2::3 remote-as external
+          neighbor 2001:db8:2::3 timers 3 10
+          address-family ipv6 unicast
+           neighbor 2001:db8:2::3 activate
+          exit-address-family
+         exit
+        end
+    """
+    )
+
+    # --- Verify session and route ---
+
+    step("Wait for BGP session r1 <-> r3 (global address peer) to establish")
+
+    def _bgp_r3_up():
+        output = json.loads(r1.vtysh_cmd("show bgp ipv6 unicast summary json"))
+        peers = output.get("peers", {})
+        for peer, data in peers.items():
+            if "2001:db8:2::3" in peer and data.get("state") == "Established":
+                return None
+        return "BGP session to 2001:db8:2::3 not established"
+
+    test_func = functools.partial(_bgp_r3_up)
+    _, result = topotest.run_and_expect(test_func, None, count=60, wait=1)
+    assert result is None, "BGP session r1<->r3 did not establish"
+
+    step("Wait for r1 to receive 2001:db8:3::1/128 from r3")
+
+    def _route_from_r3():
+        output = json.loads(
+            r1.vtysh_cmd("show bgp ipv6 unicast 2001:db8:3::1/128 json")
+        )
+        paths = output.get("paths", [])
+        if not paths:
+            return "No paths for 2001:db8:3::1/128"
+        return None
+
+    test_func = functools.partial(_route_from_r3)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "r1 did not receive 2001:db8:3::1/128 from r3"
+
+    step("Check zebra NHT for fe80:1::4 — should NOT be registered with zebra")
+    zebra_nht = json.loads(r1.vtysh_cmd("show ipv6 nht json"))
+
+    ipv6_nht = zebra_nht.get("default", {}).get("ipv6", {})
+    assert "fe80:1::4" not in ipv6_nht, (
+        "Link-local nexthop fe80:1::4 (from global-address peer "
+        "2001:db8:2::3) was registered with zebra NHT (ifindex_ipv6_ll=0). "
+        "Zebra NHT output:\n" + json.dumps(zebra_nht, indent=2)
+    )
+
+
 if __name__ == "__main__":
     args = ["-s"] + sys.argv[1:]
     sys.exit(pytest.main(args))

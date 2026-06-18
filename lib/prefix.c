@@ -215,8 +215,8 @@ int prefix_match(union prefixconstptr unet, union prefixconstptr upfx)
 			return 0;
 
 		/* Set both prefix's head pointer. */
-		np = (const uint8_t *)&n->u.prefix_flowspec.ptr;
-		pp = (const uint8_t *)&p->u.prefix_flowspec.ptr;
+		np = (const uint8_t *)n->u.prefix_flowspec.ptr;
+		pp = (const uint8_t *)p->u.prefix_flowspec.ptr;
 
 		offset = n->u.prefix_flowspec.prefixlen;
 
@@ -440,8 +440,8 @@ int prefix_same(union prefixconstptr up1, union prefixconstptr up2)
 			if (p1->u.prefix_flowspec.prefixlen !=
 			    p2->u.prefix_flowspec.prefixlen)
 				return 0;
-			if (!memcmp(&p1->u.prefix_flowspec.ptr,
-				    &p2->u.prefix_flowspec.ptr,
+			if (!memcmp((void *)p1->u.prefix_flowspec.ptr,
+				    (void *)p2->u.prefix_flowspec.ptr,
 				    p2->u.prefix_flowspec.prefixlen))
 				return 1;
 		}
@@ -604,7 +604,7 @@ int str2prefix_ipv4(const char *str, struct prefix_ipv4 *p)
 {
 	int ret;
 	int plen;
-	char *pnt;
+	const char *pnt;
 	char *cp;
 
 	/* Find slash inside string. */
@@ -649,7 +649,7 @@ int str2prefix_eth(const char *str, struct prefix_eth *p)
 {
 	int ret = 0;
 	int plen = 48;
-	char *pnt;
+	const char *pnt;
 	char *cp = NULL;
 	const char *str_addr = str;
 	unsigned int a[6];
@@ -711,9 +711,16 @@ done:
 }
 
 /* Convert masklen into IP address's netmask (network byte order). */
-void masklen2ip(const int masklen, struct in_addr *netmask)
+void masklen2ip(int masklen, struct in_addr *netmask)
 {
-	assert(masklen >= 0 && masklen <= IPV4_MAX_BITLEN);
+	if (masklen < 0) {
+		zlog_warn("%s: invalid masklen %d, set to 0", __func__, masklen);
+		masklen = 0;
+	} else if (masklen > IPV4_MAX_BITLEN) {
+		zlog_warn("%s: invalid masklen %d, set to %d", __func__, masklen,
+			  IPV4_MAX_BITLEN);
+		masklen = IPV4_MAX_BITLEN;
+	}
 
 	/* left shift is only defined for less than the size of the type.
 	 * we unconditionally use long long in case the target platform
@@ -774,7 +781,7 @@ void prefix_ipv6_free(struct prefix_ipv6 **p)
 /* If given string is valid return 1 else return 0 */
 int str2prefix_ipv6(const char *str, struct prefix_ipv6 *p)
 {
-	char *pnt;
+	const char *pnt;
 	char *cp;
 	int ret;
 
@@ -822,9 +829,16 @@ int ip6_masklen(struct in6_addr netmask)
 	return 128;
 }
 
-void masklen2ip6(const int masklen, struct in6_addr *netmask)
+void masklen2ip6(int masklen, struct in6_addr *netmask)
 {
-	assert(masklen >= 0 && masklen <= IPV6_MAX_BITLEN);
+	if (masklen < 0) {
+		zlog_warn("%s: invalid masklen %d, set to 0", __func__, masklen);
+		masklen = 0;
+	} else if (masklen > IPV6_MAX_BITLEN) {
+		zlog_warn("%s: invalid masklen %d, set to %d", __func__, masklen,
+			  IPV6_MAX_BITLEN);
+		masklen = IPV6_MAX_BITLEN;
+	}
 
 	if (masklen == 0) {
 		/* note << 32 is undefined */

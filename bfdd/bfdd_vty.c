@@ -45,6 +45,7 @@ static void _display_peer(struct vty *vty, struct bfd_session *bs);
 static void _display_all_peers(struct vty *vty, char *vrfname, bool use_json);
 static void _display_peer_iter(struct hash_bucket *hb, void *arg);
 static void _display_peer_json_iter(struct hash_bucket *hb, void *arg);
+static void _display_peer_brief_json_iter(struct hash_bucket *hb, void *arg);
 static void _display_peer_counter(struct vty *vty, struct bfd_session *bs);
 static struct json_object *__display_peer_counters_json(struct bfd_session *bs);
 static void _display_peer_counters_json(struct vty *vty, struct bfd_session *bs);
@@ -156,8 +157,26 @@ static void _display_peer(struct vty *vty, struct bfd_session *bs)
 	uint32_t min = 0;
 	uint32_t avg = 0;
 	uint32_t max = 0;
+	struct key *key = NULL;
+	enum bfd_auth_type auth_type;
 
 	_display_peer_header(vty, bs);
+
+	if (bs->kc)
+		key = bfd_keychain_key_find_active(bs->kc, bs->auth_meticulous);
+	if (key) {
+		auth_type = map_keychain_algo_to_bfd_auth_type(key->hash_algo, bs->auth_meticulous);
+
+		vty_out(vty, "\t\tAuthentication is enabled");
+		vty_out(vty, " (key-chain-name %s, crypto-used %s%s)\n", bs->kc->name,
+			bfd_auth_type_get_description(auth_type),
+			bs->auth_meticulous ? ", algo meticulous" : "");
+	} else if (bs->peer_profile.auth_config.key_chain_name[0] != '\0')
+		vty_out(vty, "\t\tAuthentication is configured (key-chain-name %s)\n",
+			bs->peer_profile.auth_config.key_chain_name);
+	else if (bs->profile && bs->profile->auth_config.key_chain_name[0] != '\0')
+		vty_out(vty, "\t\tAuthentication is configured (key-chain-name %s)\n",
+			bs->profile->auth_config.key_chain_name);
 
 	vty_out(vty, "\t\tID: %u\n", bs->discrs.my_discr);
 	vty_out(vty, "\t\tRemote ID: %u\n", bs->discrs.remote_discr);
@@ -297,9 +316,39 @@ static struct json_object *__display_peer_json(struct bfd_session *bs)
 	uint32_t min = 0;
 	uint32_t avg = 0;
 	uint32_t max = 0;
+	struct json_object *auth_jo = json_object_new_object();
+	struct key *key = NULL;
+	enum bfd_auth_type auth_type;
 
 	if (bs->key.ifname[0])
 		json_object_string_add(jo, "interface", bs->key.ifname);
+
+	if (bs->kc)
+		key = bfd_keychain_key_find_active(bs->kc, bs->auth_meticulous);
+
+	if (key) {
+		auth_type = map_keychain_algo_to_bfd_auth_type(key->hash_algo, bs->auth_meticulous);
+		json_object_boolean_add(auth_jo, "enabled", true);
+		json_object_boolean_add(auth_jo, "configured", true);
+		json_object_string_add(auth_jo, "key-chain-name", bs->kc->name);
+		json_object_boolean_add(auth_jo, "key-algorithm-meticulous", bs->auth_meticulous);
+		json_object_string_add(auth_jo, "cryptoName",
+				       bfd_auth_type_get_description(auth_type));
+	} else {
+		json_object_boolean_add(auth_jo, "enabled", false);
+		if (bs->peer_profile.auth_config.key_chain_name[0] != '\0') {
+			json_object_boolean_add(auth_jo, "configured", true);
+			json_object_string_add(auth_jo, "key-chain-name",
+					       bs->peer_profile.auth_config.key_chain_name);
+		} else if (bs->profile && bs->profile->auth_config.key_chain_name[0] != '\0') {
+			json_object_boolean_add(auth_jo, "configured", true);
+			json_object_string_add(auth_jo, "key-chain-name",
+					       bs->profile->auth_config.key_chain_name);
+		} else
+			json_object_boolean_add(auth_jo, "configured", false);
+	}
+	json_object_object_add(jo, "authentication", auth_jo);
+
 	json_object_int_add(jo, "id", bs->discrs.my_discr);
 	json_object_int_add(jo, "remote-id", bs->discrs.remote_discr);
 	json_object_boolean_add(jo, "passive-mode",
@@ -569,8 +618,29 @@ static void _display_peer_counter(struct vty *vty, struct bfd_session *bs)
 		bs->stats.session_down);
 	vty_out(vty, "\t\tZebra notifications: %" PRIu64 "\n",
 		bs->stats.znotification);
-	vty_out(vty, "\t\tTx fail packet: %" PRIu64 "\n", bs->stats.tx_fail_pkt);
+	if (bs->bfd_mode == BFD_MODE_TYPE_SBFD_INIT || bs->bfd_mode == BFD_MODE_TYPE_SBFD_ECHO)
+		vty_out(vty, "\t\tTx fail packet: %" PRIu64 "\n", bs->stats.tx_fail_pkt);
 	vty_out(vty, "\t\tRX fail packet: %" PRIu64 "\n", bs->stats.rx_bad_ctrl_pkt);
+	if (bs->stats.rx_pkt_authentication_failure)
+		vty_out(vty, "\t\tRx Authentication failure: %" PRIu64 "\n",
+			bs->stats.rx_pkt_authentication_failure);
+	if (bs->stats.rx_pkt_authentication_type_mismatch)
+		vty_out(vty, "\t\tRx Authentication type mismatch: %" PRIu64 "\n",
+			bs->stats.rx_pkt_authentication_type_mismatch);
+	if (bs->stats.rx_pkt_authentication_simple_password_mismatch)
+		vty_out(vty, "\t\tRx Authentication type simple password mismatch: %" PRIu64 "\n",
+			bs->stats.rx_pkt_authentication_simple_password_mismatch);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_mismatch)
+		vty_out(vty, "\t\tRx Authentication type keyed sha-1 mismatch: %" PRIu64 "\n",
+			bs->stats.rx_pkt_authentication_keyed_sha1_mismatch);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_sequence_error)
+		vty_out(vty, "\t\tRx Authentication type keyed sha-1 sequence error: %" PRIu64 "\n",
+			bs->stats.rx_pkt_authentication_keyed_sha1_sequence_error);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_sequence_meticulous_error)
+		vty_out(vty,
+			"\t\tRx Authentication type keyed sha-1 meticulous sequence error: %" PRIu64
+			"\n",
+			bs->stats.rx_pkt_authentication_keyed_sha1_sequence_meticulous_error);
 	vty_out(vty, "\n");
 }
 
@@ -594,6 +664,25 @@ static struct json_object *__display_peer_counters_json(struct bfd_session *bs)
 	json_object_int_add(jo, "session-up", bs->stats.session_up);
 	json_object_int_add(jo, "session-down", bs->stats.session_down);
 	json_object_int_add(jo, "zebra-notifications", bs->stats.znotification);
+	if (bs->stats.rx_pkt_authentication_failure)
+		json_object_int_add(jo, "rx-pkt-authentication-failure",
+				    bs->stats.rx_pkt_authentication_failure);
+	if (bs->stats.rx_pkt_authentication_type_mismatch)
+		json_object_int_add(jo, "rx-pkt-authentication-type-mismatch",
+				    bs->stats.rx_pkt_authentication_type_mismatch);
+	if (bs->stats.rx_pkt_authentication_simple_password_mismatch)
+		json_object_int_add(jo, "rx-pkt-authentication-simple-password-mismatch",
+				    bs->stats.rx_pkt_authentication_simple_password_mismatch);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_mismatch)
+		json_object_int_add(jo, "rx-pkt-authentication-keyed-sha1-mismatch",
+				    bs->stats.rx_pkt_authentication_keyed_sha1_mismatch);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_sequence_error)
+		json_object_int_add(jo, "rx-pkt-authentication-keyed-sha1-sequence-error",
+				    bs->stats.rx_pkt_authentication_keyed_sha1_sequence_error);
+	if (bs->stats.rx_pkt_authentication_keyed_sha1_sequence_meticulous_error)
+		json_object_int_add(jo,
+				    "rx-pkt-authentication-keyed-sha1-sequence-meticulous-error",
+				    bs->stats.rx_pkt_authentication_keyed_sha1_sequence_meticulous_error);
 
 	if (bs->bfd_mode == BFD_MODE_TYPE_SBFD_INIT || bs->bfd_mode == BFD_MODE_TYPE_SBFD_ECHO)
 		json_object_int_add(jo, "tx-fail-packet", bs->stats.tx_fail_pkt);
@@ -833,6 +922,78 @@ static void _display_peer_brief_iter(struct hash_bucket *hb, void *arg)
 	_display_peer_brief(vty, bs);
 }
 
+static struct json_object *_display_peer_brief_json(struct bfd_session *bs)
+{
+	struct json_object *jo = json_object_new_object();
+	struct in6_addr key_local = bs->key.local;
+	struct in6_addr key_peer = bs->key.peer;
+
+	json_object_int_add(jo, "id", bs->discrs.my_discr);
+
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_MH)) {
+		if (bs->key.family == AF_INET)
+			json_object_string_addf(jo, "local", "%pI4",
+						(const struct in_addr *)&key_local);
+		else
+			json_object_string_addf(jo, "local", "%pI6", &key_local);
+	} else {
+		if (memcmp(&bs->key.local, &zero_addr, sizeof(bs->key.local))) {
+			if (bs->key.family == AF_INET)
+				json_object_string_addf(jo, "local", "%pI4",
+							(const struct in_addr *)&key_local);
+			else
+				json_object_string_addf(jo, "local", "%pI6", &key_local);
+		} else
+			json_object_string_add(jo, "local", satostr(&bs->local_address));
+	}
+
+	if (bs->key.family == AF_INET)
+		json_object_string_addf(jo, "peer", "%pI4", (const struct in_addr *)&key_peer);
+	else
+		json_object_string_addf(jo, "peer", "%pI6", &key_peer);
+
+	switch (bs->ses_state) {
+	case PTM_BFD_ADM_DOWN:
+		json_object_string_add(jo, "status", "shutdown");
+		break;
+	case PTM_BFD_DOWN:
+		json_object_string_add(jo, "status", "down");
+		break;
+	case PTM_BFD_INIT:
+		json_object_string_add(jo, "status", "init");
+		break;
+	case PTM_BFD_UP:
+		json_object_string_add(jo, "status", "up");
+		break;
+	default:
+		json_object_string_add(jo, "status", "unknown");
+		break;
+	}
+
+	if (bs->profile_name)
+		json_object_string_add(jo, "profile", bs->profile_name);
+
+	return jo;
+}
+
+static void _display_peer_brief_json_iter(struct hash_bucket *hb, void *arg)
+{
+	struct bfd_vrf_tuple *bvt = (struct bfd_vrf_tuple *)arg;
+	struct json_object *jo;
+	struct bfd_session *bs = hb->data;
+
+	if (!bvt)
+		return;
+	jo = bvt->jo;
+
+	if (bvt->vrfname) {
+		if (!bs->key.vrfname[0] || !strmatch(bs->key.vrfname, bvt->vrfname))
+			return;
+	}
+
+	json_object_array_add(jo, _display_peer_brief_json(bs));
+}
+
 static void _display_peers_brief(struct vty *vty, const char *vrfname, bool use_json)
 {
 	struct json_object *jo;
@@ -863,7 +1024,7 @@ static void _display_peers_brief(struct vty *vty, const char *vrfname, bool use_
 	jo = json_object_new_array();
 	bvt.jo = jo;
 
-	bfd_id_iterate(_display_peer_json_iter, &bvt);
+	bfd_id_iterate(_display_peer_brief_json_iter, &bvt);
 
 	vty_json(vty, jo);
 }

@@ -307,11 +307,6 @@ static int gm_config_write(struct vty *vty, int writes,
 		++writes;
 	}
 
-	if (pim_ifp->gm_proxy) {
-		vty_out(vty, " ip igmp proxy\n");
-		++writes;
-	}
-
 	/* ip igmp version */
 	if (pim_ifp->igmp_version != IGMP_DEFAULT_VERSION) {
 		vty_out(vty, " ip igmp version %d\n", pim_ifp->igmp_version);
@@ -510,6 +505,24 @@ int pim_config_write(struct vty *vty, int writes, struct interface *ifp,
 		++writes;
 	}
 
+	/*
+	 * IF igmp/mld proxy route-map
+	 *
+	 * Must be emitted before 'proxy' so that on config replay
+	 * pim_if_gm_proxy_init() runs with the filter already set.
+	 */
+	if (pim_ifp->gm_proxy_filter.rmapname) {
+		vty_out(vty, " " PIM_AF_NAME " " GM_AF_DBG " proxy route-map %s\n",
+			pim_ifp->gm_proxy_filter.rmapname);
+		++writes;
+	}
+
+	/* IF igmp/mld proxy */
+	if (pim_ifp->gm_proxy) {
+		vty_out(vty, " " PIM_AF_NAME " " GM_AF_DBG " proxy\n");
+		++writes;
+	}
+
 	/* IF igmp/mld max-sources */
 	if (pim_ifp->gm_source_limit != UINT32_MAX) {
 		vty_out(vty, " " PIM_AF_NAME " " GM_AF_DBG " max-sources %u\n",
@@ -598,13 +611,12 @@ int pim_config_write(struct vty *vty, int writes, struct interface *ifp,
 	/* boundary */
 	if (pim_ifp->boundary_oil_plist) {
 		vty_out(vty, " " PIM_AF_NAME " multicast boundary oil %s\n",
-			pim_ifp->boundary_oil_plist->name);
+			pim_ifp->boundary_oil_plist);
 		++writes;
 	}
 
 	if (pim_ifp->boundary_acl) {
-		vty_out(vty, " " PIM_AF_NAME " multicast boundary %s\n",
-			pim_ifp->boundary_acl->name);
+		vty_out(vty, " " PIM_AF_NAME " multicast boundary %s\n", pim_ifp->boundary_acl);
 		++writes;
 	}
 

@@ -1809,7 +1809,13 @@ int ospf6_redistribute_config_write(struct vty *vty, struct ospf6 *ospf6)
 	int type;
 	struct ospf6_redist *red;
 
-	for (type = 0; type <= ZEBRA_ROUTE_MAX; type++) {
+	/*
+	 * type < ZEBRA_ROUTE_MAX is intentional here: otherwise
+	 * for default routes invalid command
+	 *		redistribute unknown metric-type 1 route-map foo-bar-3
+	 * will be output
+	 */
+	for (type = 0; type < ZEBRA_ROUTE_MAX; type++) {
 		red = ospf6_redist_lookup(ospf6, type, 0);
 		if (!red)
 			continue;
@@ -2563,7 +2569,7 @@ static void ospf6_asbr_external_route_show(struct vty *vty,
 	char route_type[2];
 
 	prefix2str(&route->prefix, prefix, sizeof(prefix));
-	tmp_id = ntohl(info->id);
+	tmp_id = htonl(info->id);
 	inet_ntop(AF_INET, &tmp_id, id, sizeof(id));
 	if (!IN6_IS_ADDR_UNSPECIFIED(&info->forwarding))
 		inet_ntop(AF_INET6, &info->forwarding, forwarding,
