@@ -178,22 +178,37 @@ typedef enum {
 	SAFI_UNSPEC = 0,
 	SAFI_UNICAST = 1,
 	SAFI_MULTICAST = 2,
+	/* Maps to IANA_SAFI_MPLS_VPN - BGP MPLS-VPN per RFC 4364 / RFC 8277 */
 	SAFI_MPLS_VPN = 3,
+	/* Maps to IANA_SAFI_ENCAP - BGP Encapsulation per RFC 5512 (obsoleted
+	 * by RFC 9012)
+	 */
 	SAFI_ENCAP = 4,
+	/* Maps to IANA_SAFI_EVPN - BGP EVPN per RFC 7432 */
 	SAFI_EVPN = 5,
+	/* Maps to IANA_SAFI_LABELED_UNICAST - BGP-LU per RFC 3107 / RFC 8277 */
 	SAFI_LABELED_UNICAST = 6,
+	/* Maps to IANA_SAFI_FLOWSPEC - Flowspec per RFC 8955 */
 	SAFI_FLOWSPEC = 7,
 	SAFI_BGP_LS = 8, /* BGP-LS (RFC 9552) */
-	SAFI_MAX = 9
+	SAFI_UNREACH = 9,
+	SAFI_MAX = 10
 } safi_t;
 
 #define FOREACH_AFI_SAFI(afi, safi)                                            \
 	for (afi = AFI_IP; afi < AFI_MAX; afi++)                               \
 		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)
 
-#define FOREACH_AFI_SAFI_NSF(afi, safi)                                                           \
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)                                                  \
-		for (safi = SAFI_UNICAST; safi <= SAFI_EVPN; safi++)
+/*
+ * Iterate the SAFIs that participate in Non-Stop Forwarding (Graceful
+ * Restart): UNICAST, MULTICAST, MPLS_VPN, ENCAP and EVPN (SAFI 1-5),
+ * plus UNREACH. LABELED_UNICAST, FLOWSPEC and BGP_LS are skipped as
+ * they have no GR semantics.
+ */
+#define FOREACH_AFI_SAFI_NSF(afi, safi)                                        \
+	for (afi = AFI_IP; afi < AFI_MAX; afi++)                               \
+		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)             \
+			if (safi <= SAFI_EVPN || safi == SAFI_UNREACH)
 
 /* Flag manipulation macros. */
 #define CHECK_FLAG(V,F)      ((V) & (F))

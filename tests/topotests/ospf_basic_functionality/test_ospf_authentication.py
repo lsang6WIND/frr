@@ -294,11 +294,10 @@ def test_ospf_authentication_simple_pass_tc28_p1(request):
     dut = "r1"
     intf = topo["routers"]["r1"]["links"]["r2"]["interface"]
     shutdown_bringup_interface(tgen, dut, intf, False)
-    shutdown_bringup_interface(tgen, dut, intf, True)
 
-    # clear ip ospf after configuring the authentication.
-    clear_ospf(tgen, "r1")
-
+    # Configure authentication BEFORE bringing the interface up so R1 sends
+    # authenticated Hellos from the start. Otherwise R1 briefly sends
+    # unauthenticated packets which R2 rejects, causing flaky convergence.
     r1_ospf_auth = {
         "r1": {
             "links": {
@@ -308,6 +307,9 @@ def test_ospf_authentication_simple_pass_tc28_p1(request):
     }
     result = config_ospf_interface(tgen, topo, r1_ospf_auth)
     assert result is True, "Testcase {} :Failed \n Error: {}".format(tc_name, result)
+
+    shutdown_bringup_interface(tgen, dut, intf, True)
+    clear_ospf(tgen, "r1")
 
     step(
         "Verify that the neighbour is FULL between R1 and R2 with new "
@@ -505,8 +507,10 @@ def test_ospf_authentication_md5_tc29_p1(request):
     dut = "r1"
     intf = topo["routers"]["r1"]["links"]["r2"]["interface"]
     shutdown_bringup_interface(tgen, dut, intf, False)
-    shutdown_bringup_interface(tgen, dut, intf, True)
-    clear_ospf(tgen, "r1")
+
+    # Configure authentication BEFORE bringing the interface up so R1 sends
+    # authenticated Hellos from the start. Otherwise R1 briefly sends
+    # unauthenticated packets which R2 rejects, causing flaky convergence.
     r1_ospf_auth = {
         "r1": {
             "links": {
@@ -522,6 +526,9 @@ def test_ospf_authentication_md5_tc29_p1(request):
     }
     result = config_ospf_interface(tgen, topo, r1_ospf_auth)
     assert result is True, "Testcase {} :Failed \n Error: {}".format(tc_name, result)
+
+    shutdown_bringup_interface(tgen, dut, intf, True)
+    clear_ospf(tgen, "r1")
 
     step(
         "Verify that the neighbour is FULL between R1 and R2 with new "
@@ -734,8 +741,10 @@ def test_ospf_authentication_md5_keychain_tc30_p1(request):
     dut = "r1"
     intf = topo["routers"]["r1"]["links"]["r2"]["interface"]
     shutdown_bringup_interface(tgen, dut, intf, False)
-    shutdown_bringup_interface(tgen, dut, intf, True)
-    clear_ospf(tgen, "r1")
+
+    # Configure authentication BEFORE bringing the interface up so R1 sends
+    # authenticated Hellos from the start. Otherwise R1 briefly sends
+    # unauthenticated packets which R2 rejects, causing flaky convergence.
     router1.vtysh_cmd(
         """configure terminal
            key chain auth
@@ -757,6 +766,9 @@ def test_ospf_authentication_md5_keychain_tc30_p1(request):
     }
     result = config_ospf_interface(tgen, topo, r1_ospf_auth)
     assert result is True, "Testcase {} :Failed \n Error: {}".format(tc_name, result)
+
+    shutdown_bringup_interface(tgen, dut, intf, True)
+    clear_ospf(tgen, "r1")
 
     step(
         "Verify that the neighbour is FULL between R1 and R2 with new "
@@ -969,8 +981,10 @@ def test_ospf_authentication_sha256_keychain_tc32_p1(request):
     dut = "r1"
     intf = topo["routers"]["r1"]["links"]["r2"]["interface"]
     shutdown_bringup_interface(tgen, dut, intf, False)
-    shutdown_bringup_interface(tgen, dut, intf, True)
-    clear_ospf(tgen, "r1")
+
+    # Configure authentication BEFORE bringing the interface up so R1 sends
+    # authenticated Hellos from the start. Otherwise R1 briefly sends
+    # unauthenticated packets which R2 rejects, causing flaky convergence.
     router1.vtysh_cmd(
         """configure terminal
            key chain auth
@@ -992,6 +1006,9 @@ def test_ospf_authentication_sha256_keychain_tc32_p1(request):
     }
     result = config_ospf_interface(tgen, topo, r1_ospf_auth)
     assert result is True, "Testcase {} :Failed \n Error: {}".format(tc_name, result)
+
+    shutdown_bringup_interface(tgen, dut, intf, True)
+    clear_ospf(tgen, "r1")
 
     step(
         "Verify that the neighbour is FULL between R1 and R2 with new "

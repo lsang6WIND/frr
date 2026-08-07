@@ -2237,7 +2237,7 @@ enum bgp_fsm_state_progress bgp_stop(struct peer_connection *connection)
 		update_group_remove_peer_afs(peer);
 
 		/* Withdraw Link NLRI for BGP session (local -> peer) */
-		if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+		if (bgp->ls_info && bgp->ls_info->enable_distribution)
 			if (bgp_ls_withdraw_bgp_link(bgp, peer) != 0)
 				zlog_warn("BGP-LS: Failed to withdraw link NLRI for peer %s",
 					  peer->host);
@@ -2870,9 +2870,16 @@ static void bgp_peer_process_gr_cap_clear_stale(struct peer *peer)
 			 * safi). However, if the peer didn't adv
 			 * the F-bit, any previous (stale) routes
 			 * should be flushed.
+			 *
+			 * Exception: SAFI_UNREACH has no forwarding state,
+			 * so F-bit has no defined semantics. Per RFC draft,
+			 * stale entries must be retained until EOR or
+			 * Restart Time expiry, regardless of F-bit.
 			 */
 			if (peer->nsf[afi][safi] &&
-			    !CHECK_FLAG(peer->af_cap[afi][safi], PEER_CAP_RESTART_AF_PRESERVE_RCV))
+			    !CHECK_FLAG(peer->af_cap[afi][safi],
+					PEER_CAP_RESTART_AF_PRESERVE_RCV) &&
+			    safi != SAFI_UNREACH)
 				bgp_clear_stale_route(peer, afi, safi);
 
 			peer->nsf[afi][safi] = 1;
@@ -2960,6 +2967,14 @@ bgp_establish(struct peer_connection *connection)
 
 	/* Increment established count. */
 	peer->established++;
+
+	/* Stamp the session uptime before the status change so that the
+	 * peer_status_changed hook (which builds the BMP Peer Up message)
+	 * sees this session's establish time rather than the previous
+	 * session's disconnect time.
+	 */
+	peer->uptime = monotime(NULL);
+
 	bgp_fsm_change_status(connection, Established);
 
 	/* bgp log-neighbor-changes of neighbor Up */
@@ -2982,11 +2997,9 @@ bgp_establish(struct peer_connection *connection)
 	/* graceful restart handling */
 	bgp_peer_process_gr_cap_clear_stale(peer);
 
-	/* Reset uptime, turn on keepalives, send current table. */
+	/* Turn on keepalives, send current table. */
 	if (!peer->v_holdtime)
 		bgp_keepalives_on(connection);
-
-	peer->uptime = monotime(NULL);
 
 	/* Send route-refresh when ORF is enabled.
 	 * Stop Long-lived Graceful Restart timers.
@@ -3021,7 +3034,7 @@ bgp_establish(struct peer_connection *connection)
 	}
 
 	/* Generate Link NLRI for BGP session (local -> peer) */
-	if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
 		if (bgp_ls_originate_bgp_link(bgp, peer) != 0)
 			zlog_warn("BGP-LS: Failed to originate link NLRI for peer %s", peer->host);
 

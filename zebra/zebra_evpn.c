@@ -417,11 +417,16 @@ int zebra_evpn_gw_macip_add(struct interface *ifp, struct zebra_evpn *zevpn,
 	struct zebra_if *zif = NULL;
 	struct zebra_vxlan_vni *vni;
 
+	if (!zevpn->vxlan_if)
+		return -1;
+
 	zif = zevpn->vxlan_if->info;
 	if (!zif)
 		return -1;
 
 	vni = zebra_vxlan_if_vni_find(zif, zevpn->vni);
+	if (!vni)
+		return -1;
 
 	zebra_evpn_mac_gw_macip_add(ifp, zevpn, ip, &mac, macaddr,
 				    vni->access_vlan, true);
@@ -1099,6 +1104,7 @@ int zebra_evpn_send_add_to_client(struct zebra_evpn *zevpn)
 	struct zserv *client;
 	struct stream *s;
 	ifindex_t svi_index;
+	struct ipaddr local_vtep_ip;
 	int rc;
 
 	client = zserv_find_client(ZEBRA_ROUTE_BGP, 0);
@@ -1112,7 +1118,12 @@ int zebra_evpn_send_add_to_client(struct zebra_evpn *zevpn)
 
 	zclient_create_header(s, ZEBRA_VNI_ADD, zebra_vrf_get_evpn_id());
 	stream_putl(s, zevpn->vni);
-	stream_put_ipaddr(s, &zevpn->local_vtep_ip);
+	local_vtep_ip = zevpn->local_vtep_ip;
+	if (IS_IPADDR_NONE(&local_vtep_ip)) {
+		SET_IPADDR_V4(&local_vtep_ip);
+		local_vtep_ip.ipaddr_v4.s_addr = INADDR_ANY;
+	}
+	stream_put_ipaddr(s, &local_vtep_ip);
 	stream_put(s, &zevpn->vrf_id, sizeof(vrf_id_t)); /* tenant vrf */
 	stream_put_in_addr(s, &zevpn->mcast_grp);
 	stream_put(s, &svi_index, sizeof(ifindex_t));
@@ -1122,7 +1133,7 @@ int zebra_evpn_send_add_to_client(struct zebra_evpn *zevpn)
 
 	if (IS_ZEBRA_DEBUG_VXLAN)
 		zlog_debug("Send EVPN_ADD %u %pIA tenant vrf %s(%u) SVI index %u to %s", zevpn->vni,
-			   &zevpn->local_vtep_ip, vrf_id_to_name(zevpn->vrf_id), zevpn->vrf_id,
+			   &local_vtep_ip, vrf_id_to_name(zevpn->vrf_id), zevpn->vrf_id,
 			   (zevpn->svi_if ? zevpn->svi_if->ifindex : 0),
 			   zebra_route_string(client->proto));
 
@@ -1278,6 +1289,13 @@ int zebra_evpn_vtep_del_all(struct zebra_evpn *zevpn, int uninstall, struct l2vn
  */
 int zebra_evpn_vtep_install(struct zebra_evpn *zevpn, struct zebra_vtep *zvtep)
 {
+	if (!zevpn->vxlan_if) {
+		if (IS_ZEBRA_DEBUG_VXLAN)
+			zlog_debug("VNI %u hash %p couldn't be installed - no intf", zevpn->vni,
+				   zevpn);
+		return -1;
+	}
+
 	if (is_vxlan_flooding_head_end() &&
 	    (zvtep->flood_control == VXLAN_FLOOD_HEAD_END_REPL)) {
 		if (ZEBRA_DPLANE_REQUEST_FAILURE ==

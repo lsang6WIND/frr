@@ -61,6 +61,7 @@
 /* SRv6 Service Sub-TLV types */
 #define BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO 1
 #define BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH 21
+#define BGP_PREFIX_SID_SRV6_SERVICE_SID_FLAGS_KNOWN_MASK 0x00
 
 /* SRv6 Service Data Sub-Sub-TLV types */
 #define BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_STRUCTURE 1
@@ -407,7 +408,7 @@ extern void bgp_attr_init(void);
 extern void bgp_attr_finish(void);
 extern enum bgp_attr_parse_ret bgp_attr_parse(struct peer_connection *connection, struct attr *attr,
 					      bgp_size_t size, struct bgp_nlri *mp_update,
-					      struct bgp_nlri *mp_withdraw);
+					      struct bgp_nlri *mp_withdraw, bool has_nlri);
 extern struct attr *bgp_attr_intern(struct attr *attr);
 extern struct bgp_attr_srv6_l3service *
 bgp_attr_srv6_l3service_intern(struct bgp_attr_srv6_l3service *vpn);
@@ -487,7 +488,8 @@ extern void bgp_packet_mpattr_prefix(struct stream *s, afi_t afi, safi_t safi,
 				     const struct prefix *p, const struct prefix_rd *prd,
 				     mpls_label_t *label, uint8_t num_labels, bool addpath_capable,
 				     uint32_t addpath_tx_id, struct attr *attr,
-				     struct bgp_ls_nlri *ls_nlri);
+				     struct bgp_ls_nlri *ls_nlri,
+				     struct bgp_path_info *path);
 extern size_t bgp_packet_mpattr_prefix_size(afi_t afi, safi_t safi,
 					    const struct prefix *p);
 extern void bgp_packet_mpattr_end(struct stream *s, size_t sizep);
@@ -686,9 +688,11 @@ static inline void bgp_attr_set_nhc(struct attr *attr, struct bgp_nhc *bnc)
 		bgp_attr_unset(attr, BGP_ATTR_NHC);
 }
 
-#define AIGP_TRANSMIT_ALLOWED(peer)                                                                \
-	(CHECK_FLAG((peer)->flags, PEER_FLAG_AIGP) || ((peer)->sub_sort == BGP_PEER_EBGP_OAD) ||   \
-	 ((peer)->sort != BGP_PEER_EBGP))
+/* draft-uttaro-idr-bgp-oad says AIGP must be disabled to be sent
+ * over OAD session, we need explicitly enable AIGP for OAD session.
+ */
+#define AIGP_TRANSMIT_ALLOWED(peer)                                                               \
+	(CHECK_FLAG((peer)->flags, PEER_FLAG_AIGP) || ((peer)->sort != BGP_PEER_EBGP))
 
 static inline uint64_t bgp_attr_get_aigp_metric(const struct attr *attr)
 {

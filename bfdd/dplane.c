@@ -325,6 +325,34 @@ static void bfd_dplane_write(struct event *t)
 	bfd_dplane_flush(bdc);
 }
 
+/*
+ * RFC 5880 Section 6.8.9: echo packets must not be transmitted faster
+ * than the interval the peer advertises it is able to receive them at.
+ *
+ * The data plane performs echo transmission but does not process control
+ * packets, so it never sees the peer's Required Min Echo RX. The daemon
+ * performs the negotiation on its behalf and pushes the result down
+ * whenever it changes.
+ */
+void bfd_dplane_echo_negotiate(struct bfd_session *bs)
+{
+	uint32_t negotiated;
+
+	if (bs->bdc == NULL || !CHECK_FLAG(bs->flags, BFD_SESS_FLAG_ECHO))
+		return;
+
+	negotiated = bs->remote_timers.required_min_echo >
+				     bs->timers.desired_min_echo_tx
+			     ? bs->remote_timers.required_min_echo
+			     : bs->timers.desired_min_echo_tx;
+
+	if (bs->echo_xmt_TO == negotiated)
+		return;
+
+	bs->echo_xmt_TO = negotiated;
+	bfd_dplane_update_session(bs);
+}
+
 static void
 bfd_dplane_session_state_change(struct bfd_dplane_ctx *bdc,
 				const struct bfddp_state_change *state)
@@ -356,6 +384,8 @@ bfd_dplane_session_state_change(struct bfd_dplane_ctx *bdc,
 	bs->remote_timers.desired_min_tx = ntohl(state->desired_tx);
 	bs->remote_timers.required_min_rx = ntohl(state->required_rx);
 	bs->remote_timers.required_min_echo = ntohl(state->required_echo_rx);
+
+	bfd_dplane_echo_negotiate(bs);
 
 	/* Notify and update counters. */
 	ptm_bfd_notify(bs, bs->ses_state);
@@ -416,6 +446,25 @@ static int bfd_dplane_enqueue(struct bfd_dplane_ctx *bdc, const void *buf,
 	/* Handle not connected yet client. */
 	if (bdc->client && bdc->sock == -1)
 		return -1;
+
+	/*
+	 * Not enough space: the buffer may simply not have been drained
+	 * yet, e.g. the initial session registration burst enqueues all
+	 * sessions before the write event ever runs. Try flushing
+	 * synchronously before giving up: the socket is normally
+	 * writable. Skip clients still connecting (flush would spin on
+	 * EAGAIN until the connection finishes).
+	 */
+	if (buflen > STREAM_WRITEABLE(bdc->outbuf) &&
+	    !(bdc->client && bdc->connecting)) {
+		/*
+		 * On socket failure or close the context is freed by
+		 * the flush. The buffer is non empty here, so a zero
+		 * return means exactly that: don't touch `bdc` again.
+		 */
+		if (bfd_dplane_flush(bdc) == 0)
+			return -1;
+	}
 
 	/* Not enough space. */
 	if (buflen > STREAM_WRITEABLE(bdc->outbuf)) {
@@ -640,7 +689,19 @@ static void _bfd_session_register_dplane(struct hash_bucket *hb, void *arg)
 	bfd_session_disable(bs);
 
 	/* Move session to data plane. */
-	_bfd_dplane_add_session(bdc, bs);
+	if (_bfd_dplane_add_session(bdc, bs) != 0) {
+		/*
+		 * The data plane didn't take the session (e.g. output
+		 * buffer full): return it to the software
+		 * implementation instead of leaving it implemented by
+		 * neither. Same recovery as data plane detach
+		 * (`_bfd_session_unregister_dplane`).
+		 */
+		zlog_warn(
+			"%s: failed to register session with data plane, keeping it in software",
+			__func__);
+		bfd_session_enable(bs);
+	}
 }
 
 static struct bfd_dplane_ctx *bfd_dplane_ctx_new(int sock)
@@ -761,7 +822,15 @@ static void _bfd_dplane_session_fill(const struct bfd_session *bs,
 	msg->data.session.lid = htonl(bs->discrs.my_discr);
 	msg->data.session.min_tx = htonl(bs->timers.desired_min_tx);
 	msg->data.session.min_rx = htonl(bs->timers.required_min_rx);
-	msg->data.session.min_echo_tx = htonl(bs->timers.desired_min_echo_tx);
+	/*
+	 * Echo transmission is performed by the data plane, but only bfdd
+	 * sees the peer's Required Min Echo RX in control packets, so send
+	 * the negotiated interval rather than the configured one. Before
+	 * negotiation `echo_xmt_TO` is zero and the configured value stands.
+	 */
+	msg->data.session.min_echo_tx =
+		htonl(bs->echo_xmt_TO ? bs->echo_xmt_TO
+				      : bs->timers.desired_min_echo_tx);
 	msg->data.session.min_echo_rx = htonl(bs->timers.required_min_echo_rx);
 }
 
@@ -987,7 +1056,7 @@ static void bfd_dplane_client_init(const struct sockaddr *sa, socklen_t salen)
 	bdc = bfd_dplane_ctx_new(-1);
 	if (salen <= sizeof(bdc->addr)) {
 		memcpy(&bdc->addr, sa, salen);
-		bdc->addrlen = sizeof(bdc->addr);
+		bdc->addrlen = salen;
 	} else {
 		memcpy(&bdc->addr, sa, sizeof(bdc->addr));
 		bdc->addrlen = sizeof(bdc->addr);

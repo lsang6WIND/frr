@@ -103,6 +103,10 @@ bool pim_nht_candrp_add(struct pim_instance *pim, pim_addr addr);
 void pim_nht_delete_tracked(struct pim_instance *pim, pim_addr addr, struct pim_upstream *up,
 			    struct rp_info *rp);
 
+/* Delete a tracked upstream from the NHT entry for addr */
+void pim_nht_delete_tracked_upstream(struct pim_instance *pim, pim_addr addr,
+				     struct pim_upstream *up);
+
 /* Delete a tracked addr and decrement BSR count, if no-one else is interested, stop tracking */
 void pim_nht_bsr_del(struct pim_instance *pim, pim_addr bsr_addr);
 
@@ -118,6 +122,9 @@ void pim_nht_rp_del(struct rp_info *rp_info);
 
 /* Walk the NH cache and update every nexthop that uses the given interface */
 void pim_nht_upstream_if_update(struct pim_instance *pim, struct interface *ifp);
+
+/* Re-send ZEBRA_NEXTHOP_REGISTER once vrf_id is resolved. */
+void pim_nht_reregister_all(struct pim_instance *pim);
 
 /* Lookup nexthop information for src, returned in nexthop when function returns true.
  * Tries to find in cache first and does a synchronous lookup if not found in the cache.

@@ -95,7 +95,11 @@ struct nbr_pid_head nbrs_by_pid = RB_INITIALIZER(&nbrs_by_pid);
 static __inline int
 nbr_id_compare(const struct nbr *a, const struct nbr *b)
 {
-	return (ntohl(a->id.s_addr) - ntohl(b->id.s_addr));
+	if (ntohl(a->id.s_addr) > ntohl(b->id.s_addr))
+		return 1;
+	if (ntohl(a->id.s_addr) < ntohl(b->id.s_addr))
+		return -1;
+	return 0;
 }
 
 static __inline int
@@ -112,7 +116,11 @@ nbr_addr_compare(const struct nbr *a, const struct nbr *b)
 static __inline int
 nbr_pid_compare(const struct nbr *a, const struct nbr *b)
 {
-	return (a->peerid - b->peerid);
+	if (a->peerid > b->peerid)
+		return 1;
+	if (a->peerid < b->peerid)
+		return -1;
+	return 0;
 }
 
 int
@@ -765,7 +773,11 @@ nbr_send_labelmappings(struct nbr *nbr)
 static __inline int
 nbr_params_compare(const struct nbr_params *a, const struct nbr_params *b)
 {
-	return (ntohl(a->lsr_id.s_addr) - ntohl(b->lsr_id.s_addr));
+	if (ntohl(a->lsr_id.s_addr) > ntohl(b->lsr_id.s_addr))
+		return 1;
+	if (ntohl(a->lsr_id.s_addr) < ntohl(b->lsr_id.s_addr))
+		return -1;
+	return 0;
 }
 
 struct nbr_params *

@@ -33,12 +33,15 @@ typedef enum {
 	IANA_SAFI_RESERVED = 0,
 	IANA_SAFI_UNICAST = 1,
 	IANA_SAFI_MULTICAST = 2,
-	IANA_SAFI_LABELED_UNICAST = 4,
+	IANA_SAFI_LABELED_UNICAST = 4, /* BGP-LU per RFC 3107 / RFC 8277 */
+	/* BGP Encapsulation per RFC 5512 (obsoleted by RFC 9012) */
 	IANA_SAFI_ENCAP = 7,
-	IANA_SAFI_EVPN = 70,
+	IANA_SAFI_EVPN = 70,   /* BGP EVPN per RFC 7432 */
 	IANA_SAFI_BGP_LS = 71, /* BGP-LS per RFC 9552 */
+	IANA_SAFI_UNREACH = 81,
+	/* BGP MPLS-VPN per RFC 4364 / RFC 8277 */
 	IANA_SAFI_MPLS_VPN = 128,
-	IANA_SAFI_FLOWSPEC = 133
+	IANA_SAFI_FLOWSPEC = 133 /* Flowspec per RFC 8955 */
 } iana_safi_t;
 
 static inline afi_t afi_iana2int(iana_afi_t afi)
@@ -98,6 +101,8 @@ static inline safi_t safi_iana2int(iana_safi_t safi)
 		return SAFI_EVPN;
 	case IANA_SAFI_LABELED_UNICAST:
 		return SAFI_LABELED_UNICAST;
+	case IANA_SAFI_UNREACH:
+		return SAFI_UNREACH;
 	case IANA_SAFI_FLOWSPEC:
 		return SAFI_FLOWSPEC;
 	case IANA_SAFI_BGP_LS:
@@ -124,6 +129,8 @@ static inline iana_safi_t safi_int2iana(safi_t safi)
 		return IANA_SAFI_EVPN;
 	case SAFI_LABELED_UNICAST:
 		return IANA_SAFI_LABELED_UNICAST;
+	case SAFI_UNREACH:
+		return IANA_SAFI_UNREACH;
 	case SAFI_FLOWSPEC:
 		return IANA_SAFI_FLOWSPEC;
 	case SAFI_BGP_LS:

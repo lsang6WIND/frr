@@ -49,6 +49,7 @@
 #include "bgpd/bgp_io.h"
 #include "bgpd/bgp_keepalives.h"
 #include "bgpd/bgp_flowspec.h"
+#include "bgpd/bgp_unreach.h"
 #include "bgpd/bgp_trace.h"
 #include "bgpd/bgp_ls.h"
 
@@ -330,6 +331,8 @@ int bgp_nlri_parse(struct peer *peer, struct attr *attr,
 		return bgp_nlri_parse_flowspec(peer, attr, packet, mp_withdraw);
 	case SAFI_BGP_LS:
 		return bgp_nlri_parse_ls(peer, mp_withdraw ? NULL : attr, packet);
+	case SAFI_UNREACH:
+		return bgp_nlri_parse_unreach(peer, attr, packet, mp_withdraw);
 	}
 	return BGP_NLRI_PARSE_ERROR;
 }
@@ -1542,27 +1545,49 @@ void bgp_capability_send(struct peer_connection *connection, afi_t afi, safi_t s
 				   iana_safi2str(pkt_safi));
 		break;
 	case CAPABILITY_CODE_FQDN:
+		/* No hostname configured. If we never advertised one there is
+		 * nothing to do. If we advertised one before (e.g. the hostname
+		 * was later removed with `no hostname`), withdraw it so the peer
+		 * drops the stale value instead of sending an empty FQDN that
+		 * would be rejected as malformed.
+		 */
+		if (!hostname) {
+			if (!CHECK_FLAG(peer->cap, PEER_CAP_HOSTNAME_ADV)) {
+				stream_free(s);
+				return;
+			}
+			action = CAPABILITY_ACTION_UNSET;
+		}
+
 		stream_putc(s, action);
 		stream_putc(s, CAPABILITY_CODE_FQDN);
 		cap_len = stream_get_endp(s);
 		stream_putc(s, 0); /* Capability Length */
 
-		len = strlen(hostname);
-		if (len > BGP_MAX_HOSTNAME)
-			len = BGP_MAX_HOSTNAME;
-
-		stream_putc(s, len);
-		stream_put(s, hostname, len);
-
-		if (domainname) {
-			len = strlen(domainname);
+		if (action == CAPABILITY_ACTION_SET) {
+			len = strlen(hostname);
 			if (len > BGP_MAX_HOSTNAME)
 				len = BGP_MAX_HOSTNAME;
 
 			stream_putc(s, len);
-			stream_put(s, domainname, len);
-		} else
+			stream_put(s, hostname, len);
+
+			if (domainname) {
+				len = strlen(domainname);
+				if (len > BGP_MAX_HOSTNAME)
+					len = BGP_MAX_HOSTNAME;
+
+				stream_putc(s, len);
+				stream_put(s, domainname, len);
+			} else
+				stream_putc(s, 0);
+		} else {
+			/* CAPABILITY_CODE_MIN_FQDN_LEN is 2 bytes, so just to make
+			 * sure we don't miss that at the receiving end...
+			 */
 			stream_putc(s, 0);
+			stream_putc(s, 0);
+		}
 
 		len = stream_get_endp(s) - cap_len - 1;
 		stream_putc_at(s, cap_len, len);
@@ -2398,8 +2423,8 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	attr.label_index = BGP_INVALID_LABEL_INDEX;
 	attr.label = MPLS_INVALID_LABEL;
 	memset(&nlris, 0, sizeof(nlris));
-	memset(peer->rcvd_attr_str, 0, BUFSIZ);
-	peer->rcvd_attr_printed = false;
+	bm->rcvd_attr_str[0] = '\0';
+	bm->rcvd_attr_printed = false;
 
 	s = connection->curr;
 	end = stream_pnt(s) + size;
@@ -2480,10 +2505,13 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 		 ? &attr                                                                          \
 		 : NULL)
 
+	update_len = end - stream_pnt(s) - attribute_len;
+
 	/* Parse attribute when it exists. */
 	if (attribute_len) {
 		attr_parse_ret = bgp_attr_parse(connection, &attr, attribute_len,
-						&nlris[NLRI_MP_UPDATE], &nlris[NLRI_MP_WITHDRAW]);
+						&nlris[NLRI_MP_UPDATE], &nlris[NLRI_MP_WITHDRAW],
+						update_len > 0);
 		if (attr_parse_ret == BGP_ATTR_PARSE_ERROR) {
 			bgp_attr_unintern_sub(&attr);
 			return BGP_Stop;
@@ -2494,8 +2522,7 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	if (attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW ||
 	    attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW_IGNORE || BGP_DEBUG(update, UPDATE_IN) ||
 	    BGP_DEBUG(update, UPDATE_PREFIX)) {
-		ret = bgp_dump_attr(&attr, peer->rcvd_attr_str,
-				    sizeof(peer->rcvd_attr_str));
+		ret = bgp_dump_attr(&attr, bm->rcvd_attr_str, sizeof(bm->rcvd_attr_str));
 
 		if (attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW ||
 		    attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW_IGNORE) {
@@ -2508,14 +2535,10 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 
 		if (ret && bgp_debug_update(peer, NULL, NULL, 1) &&
 		    BGP_DEBUG(update, UPDATE_DETAIL)) {
-			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
-				   peer->rcvd_attr_str);
-			peer->rcvd_attr_printed = true;
+			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer, bm->rcvd_attr_str);
+			bm->rcvd_attr_printed = true;
 		}
 	}
-
-	/* Network Layer Reachability Information. */
-	update_len = end - stream_pnt(s);
 
 	/* If we received MP_UNREACH_NLRI attribute, but also NLRIs, then
 	 * NLRIs should be handled as a new data. Though, if we received
@@ -2616,6 +2639,9 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 
 	/* Notify BGP Conditional advertisement scanner process */
 	peer->advmap_table_change = true;
+
+	/* Clear attribute string to prevent stale state from other call paths */
+	bm->rcvd_attr_str[0] = '\0';
 
 	return Receive_UPDATE_message;
 }
@@ -2782,8 +2808,6 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 	safi_t safi;
 	struct stream *s;
 	struct peer_af *paf;
-	struct update_group *updgrp;
-	struct peer *updgrp_peer;
 	uint8_t subtype;
 	bool force_update = false;
 	bgp_size_t msg_length =
@@ -2931,16 +2955,14 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 							"%pBP rcvd Remove-All pfxlist ORF request",
 							peer);
 					prefix_bgp_orf_remove_all(afi, name);
-					peer->orf_plist[afi][safi] = prefix_bgp_orf_lookup(afi,
-											   name);
+					peer->orf_plist[afi][safi] = NULL;
 
+					/* Propagate to conf peer for REFRESH_DEFER case */
 					paf = peer_af_find(peer, afi, safi);
-					if (paf && paf->subgroup) {
-						updgrp = PAF_UPDGRP(paf);
-						updgrp_peer = UPDGRP_PEER(updgrp);
-						updgrp_peer->orf_plist[afi][safi] =
-							peer->orf_plist[afi][safi];
-					}
+					if (paf && paf->subgroup)
+						UPDGRP_PEER(PAF_UPDGRP(paf))->orf_plist[afi][safi] =
+							NULL;
+
 					break;
 				}
 
@@ -3061,9 +3083,13 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 
 	paf = peer_af_find(peer, afi, safi);
 	if (paf && paf->subgroup) {
-		updgrp = PAF_UPDGRP(paf);
-		updgrp_peer = UPDGRP_PEER(updgrp);
-		updgrp_peer->orf_plist[afi][safi] = peer->orf_plist[afi][safi];
+		/*
+		 * A peer sending ORF to us is placed into a dedicated update-group
+		 * at session establishment (isolated by peer address).
+		 * Propagate the updated orf_plist directly to the conf peer
+		 * so that subgroup_announce_check() sees the new filter.
+		 */
+		UPDGRP_PEER(PAF_UPDGRP(paf))->orf_plist[afi][safi] = peer->orf_plist[afi][safi];
 
 		/* Avoid suppressing duplicate routes later
 		 * when processing in subgroup_announce_table().

@@ -253,6 +253,7 @@ def get_normalized_aggregate_address_line(line):
 
       aggregate-address <prefix> [as-set] [summary-only] [route-map NAME]
           [origin <egp|igp|incomplete>] [matching-MED-only] [suppress-map NAME]
+          [upa [drop] [max-routes (1-4294967295)]]
 
     Reorder a user-supplied line into that canonical order so that a line
     written with the keywords in a different order is not seen as a change.
@@ -274,6 +275,9 @@ def get_normalized_aggregate_address_line(line):
     route_map = None
     origin = None
     suppress_map = None
+    upa = False
+    upa_drop = False
+    upa_max_routes = None
 
     i = 0
     while i < len(rest):
@@ -293,6 +297,13 @@ def get_normalized_aggregate_address_line(line):
         elif tok == "suppress-map" and i + 1 < len(rest):
             i += 1
             suppress_map = rest[i]
+        elif tok == "upa":
+            upa = True
+        elif tok == "drop":
+            upa_drop = True
+        elif tok == "max-routes" and i + 1 < len(rest):
+            i += 1
+            upa_max_routes = rest[i]
         else:
             # Unrecognized token; leave the line untouched.
             return line
@@ -311,6 +322,12 @@ def get_normalized_aggregate_address_line(line):
         normalized += " matching-MED-only"
     if suppress_map:
         normalized += " suppress-map " + suppress_map
+    if upa:
+        normalized += " upa"
+        if upa_drop:
+            normalized += " drop"
+        if upa_max_routes:
+            normalized += " max-routes " + upa_max_routes
 
     return normalized
 
@@ -2641,6 +2658,12 @@ if __name__ == "__main__":
             # apply to other scenarios as well where configuring FOO adds BAR
             # to the config.
             if lines_to_del and x == 0:
+                log.info("lines_to_del content\n%s", pformat(lines_to_del))
+
+                # Flush log before executing deletes so content is preserved if crash occurs
+                for handler in log.handlers:
+                    handler.flush()
+
                 for ctx_keys, line in lines_to_del:
                     if line == "!":
                         continue
@@ -2692,7 +2715,6 @@ if __name__ == "__main__":
                             new_last_arg = last_arg[0:-1]
                             cmd[-1] = " ".join(new_last_arg)
                         else:
-                            log.info(f'Executed "{" ".join(cmd)}"')
                             break
 
             if lines_to_add:
@@ -2720,6 +2742,10 @@ if __name__ == "__main__":
 
                     filename = args.rundir + "/reload-%s.txt" % random_string
                     log.info(f"{filename} content\n{pformat(lines_to_configure)}")
+
+                    # Flush log before vtysh.exec_file() so content is preserved if crash occurs
+                    for handler in log.handlers:
+                        handler.flush()
 
                     with open(filename, "w") as fh:
                         for line in lines_to_configure:

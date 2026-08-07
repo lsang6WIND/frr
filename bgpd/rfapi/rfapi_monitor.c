@@ -232,6 +232,7 @@ void rfapiMonitorExtraFlush(safi_t safi, struct agg_node *rn)
 		break;
 
 	case SAFI_BGP_LS:
+	case SAFI_UNREACH:
 	case SAFI_UNSPEC:
 	case SAFI_UNICAST:
 	case SAFI_MULTICAST:
@@ -301,6 +302,7 @@ void rfapiMonitorExtraPrune(safi_t safi, struct agg_node *rn)
 		break;
 
 	case SAFI_BGP_LS:
+	case SAFI_UNREACH:
 	case SAFI_UNSPEC:
 	case SAFI_UNICAST:
 	case SAFI_MULTICAST:
@@ -1099,7 +1101,11 @@ static int mon_eth_cmp(const void *a, const void *b)
 	/*
 	 * compare LNIs
 	 */
-	return (m1->logical_net_id - m2->logical_net_id);
+	if (m1->logical_net_id > m2->logical_net_id)
+		return 1;
+	if (m1->logical_net_id < m2->logical_net_id)
+		return -1;
+	return 0;
 }
 
 static void rfapiMonitorEthAttachImport(

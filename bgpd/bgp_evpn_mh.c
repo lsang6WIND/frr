@@ -715,47 +715,35 @@ int delete_global_ead_evi_routes(struct bgp *bgp, struct bgpevpn *vpn)
  * Reference: draft-ietf-bess-evpn-pref-df
  */
 /* Build extended community for EVPN ES (type-4) route */
-static void bgp_evpn_type4_route_extcomm_build(struct bgp_evpn_es *es,
-		struct attr *attr)
+static void bgp_evpn_type4_route_extcomm_build(struct bgp_evpn_es *es, struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity ecom_es_rt;
-	struct ecommunity ecom_df;
-	struct ecommunity_val eval;
-	struct ecommunity_val eval_es_rt;
-	struct ecommunity_val eval_df;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
 	struct ethaddr mac;
+	struct ecommunity *ecom;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the ones below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* ES import RT */
 	memset(&mac, 0, sizeof(mac));
-	memset(&ecom_es_rt, 0, sizeof(ecom_es_rt));
 	es_get_system_mac(&es->esi, &mac);
-	encode_es_rt_extcomm(&eval_es_rt, &mac);
-	ecom_es_rt.size = 1;
-	ecom_es_rt.unit_size = ECOMMUNITY_SIZE;
-	ecom_es_rt.val = (uint8_t *)eval_es_rt.val;
-	bgp_attr_set_ecommunity(
-		attr,
-		ecommunity_merge(bgp_attr_get_ecommunity(attr), &ecom_es_rt));
+	encode_es_rt_extcomm(&eval_tmp, &mac);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* DF election extended community */
-	memset(&ecom_df, 0, sizeof(ecom_df));
-	encode_df_elect_extcomm(&eval_df, es->df_pref);
-	ecom_df.size = 1;
-	ecom_df.val = (uint8_t *)eval_df.val;
-	bgp_attr_set_ecommunity(
-		attr,
-		ecommunity_merge(bgp_attr_get_ecommunity(attr), &ecom_df));
+	encode_df_elect_extcomm(&eval_tmp, es->df_pref);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Create or update local type-4 route */
@@ -900,7 +888,7 @@ int bgp_evpn_type4_route_process(struct peer *peer, afi_t afi, safi_t safi,
 	if (attr) {
 		bgp_update(peer, (struct prefix *)&p, addpath_id, attr, afi,
 			   safi, ZEBRA_ROUTE_BGP, BGP_ROUTE_NORMAL, &prd, NULL,
-			   0, 0, NULL);
+			   0, 0, NULL, NULL);
 	} else {
 		bgp_withdraw(peer, (struct prefix *)&p, addpath_id, afi, safi,
 			     ZEBRA_ROUTE_BGP, BGP_ROUTE_NORMAL, &prd, NULL, 0);
@@ -991,85 +979,80 @@ static int bgp_evpn_type4_remote_routes_import(struct bgp *bgp,
  */
 
 /* Extended communities associated with EAD-per-ES */
-static void
-bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
-				      struct attr *attr)
+static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
+						  struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity ecom_esi_label;
-	struct ecommunity_val eval;
-	struct ecommunity_val eval_esi_label;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
 	struct listnode *evi_node, *rt_node;
 	struct ecommunity *ecom;
+	struct ecommunity *export_rt;
+	struct bgp_evpn_effective_fq_rt *fq_rt;
 	struct bgp_evpn_es_evi *es_evi;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the ones below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* ESI label */
-	encode_esi_label_extcomm(&eval_esi_label,
-			false /*single_active*/);
-	ecom_esi_label.size = 1;
-	ecom_esi_label.unit_size = ECOMMUNITY_SIZE;
-	ecom_esi_label.val = (uint8_t *)eval_esi_label.val;
-	bgp_attr_set_ecommunity(attr,
-				ecommunity_merge(bgp_attr_get_ecommunity(attr),
-						 &ecom_esi_label));
+	encode_esi_label_extcomm(&eval_tmp, false /*single_active*/);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* Add export RTs for all L2-VNIs associated with this ES */
 	/* XXX - suppress EAD-ES advertisement if there are no EVIs associated
 	 * with it.
 	 */
 	if (listcount(bgp_mh_info->ead_es_export_rtl)) {
-		for (ALL_LIST_ELEMENTS_RO(bgp_mh_info->ead_es_export_rtl,
-					  rt_node, ecom))
-			bgp_attr_set_ecommunity(
-				attr, ecommunity_merge(attr->ecommunity, ecom));
+		/* TODO: convert to ecommunity_append_val_unchecked() once
+		 * uniqueness and ordering are guaranteed here, too.
+		 */
+		for (ALL_LIST_ELEMENTS_RO(bgp_mh_info->ead_es_export_rtl, rt_node, export_rt))
+			ecommunity_merge(ecom, export_rt);
 	} else {
-		for (ALL_LIST_ELEMENTS_RO(es_frag->es_evi_frag_list, evi_node,
-					  es_evi)) {
+		for (ALL_LIST_ELEMENTS_RO(es_frag->es_evi_frag_list, evi_node, es_evi)) {
 			if (!CHECK_FLAG(es_evi->flags, BGP_EVPNES_EVI_LOCAL))
 				continue;
-			for (ALL_LIST_ELEMENTS_RO(es_evi->vpn->export_rtl,
-						  rt_node, ecom))
-				bgp_attr_set_ecommunity(
-					attr, ecommunity_merge(attr->ecommunity,
-							       ecom));
+			frr_each (bgp_evpn_effective_fq_rt_slu,
+				  &es_evi->vpn->effective_fq_export_rts, fq_rt)
+				ecommunity_append_val_unchecked(ecom, &fq_rt->ecom_val);
 		}
 	}
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Extended communities associated with EAD-per-EVI */
-static void bgp_evpn_type1_evi_route_extcomm_build(struct bgp_evpn_es *es,
-		struct bgpevpn *vpn, struct attr *attr)
+static void bgp_evpn_type1_evi_route_extcomm_build(struct bgp_evpn_es *es, struct bgpevpn *vpn,
+						   struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity_val eval;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
-	struct listnode *rt_node;
 	struct ecommunity *ecom;
+	struct bgp_evpn_effective_fq_rt *fq_rt;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the export RTs below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
-	/* Add export RTs for the L2-VNI */
-	for (ALL_LIST_ELEMENTS_RO(vpn->export_rtl, rt_node, ecom))
-		bgp_attr_set_ecommunity(
-			attr,
-			ecommunity_merge(bgp_attr_get_ecommunity(attr), ecom));
+	/* Add export RTs for the L2-VNI. */
+	frr_each (bgp_evpn_effective_fq_rt_slu, &vpn->effective_fq_export_rts, fq_rt)
+		ecommunity_append_val_unchecked(ecom, &fq_rt->ecom_val);
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Update EVPN EAD (type-1) route -
@@ -1370,7 +1353,7 @@ int bgp_evpn_type1_route_process(struct peer *peer, afi_t afi, safi_t safi,
 	/* Process the route. */
 	if (attr) {
 		bgp_update(peer, (struct prefix *)&p, addpath_id, attr, afi, safi, ZEBRA_ROUTE_BGP,
-			   BGP_ROUTE_NORMAL, &prd, &label[0], 1, 0, NULL);
+			   BGP_ROUTE_NORMAL, &prd, &label[0], 1, 0, NULL, NULL);
 	} else {
 		bgp_withdraw(peer, (struct prefix *)&p, addpath_id, afi, safi, ZEBRA_ROUTE_BGP,
 			     BGP_ROUTE_NORMAL, &prd, &label[0], 1);
@@ -2549,6 +2532,28 @@ int bgp_evpn_local_es_add(struct bgp *bgp, esi_t *esi, struct ipaddr originator_
 	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
 		zlog_debug("add local es %s orig-ip %pIA df_pref %u %s", es->esi_str,
 			   &originator_ip, df_pref, bypass ? "bypass" : "");
+
+	/* Handle tunnel IP (originator_ip) change for an existing local ES */
+	if (!new_es && !ipaddr_is_same(&es->originator_ip, &originator_ip)) {
+		if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
+			zlog_debug("local es %s tunnel-ip changed from %pIA to %pIA", es->esi_str,
+				   &es->originator_ip, &originator_ip);
+
+		if (bgp_evpn_local_es_is_active(es)) {
+			struct prefix_evpn p;
+			int ret;
+
+			build_evpn_type4_prefix(&p, &es->esi, es->originator_ip);
+			ret = bgp_evpn_type4_route_delete(bgp, es, &p);
+			if (ret) {
+				flog_err(EC_BGP_EVPN_ROUTE_DELETE,
+					 "%u failed to delete type-4 route for ESI %s",
+					 bgp->vrf_id, es->esi_str);
+			}
+		}
+
+		regen_esr = true;
+	}
 
 	es->originator_ip = originator_ip;
 	if (df_pref != es->df_pref) {

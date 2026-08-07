@@ -34,9 +34,10 @@ FRR_CFG_DEFAULT_ULONG(BGP_CONNECT_RETRY,
 #define BGP_AFI_SAFI_CMD_STR    BGP_AFI_CMD_STR" "BGP_SAFI_CMD_STR
 #define BGP_AFI_SAFI_HELP_STR   BGP_AFI_HELP_STR BGP_SAFI_HELP_STR
 
-#define BGP_SAFI_WITH_LABEL_CMD_STR  "<unicast|multicast|vpn|labeled-unicast|flowspec>"
-#define BGP_SAFI_WITH_LABEL_HELP_STR                                           \
-	BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR            \
+#define BGP_SAFI_WITH_LABEL_CMD_STR                                                                \
+	"<unicast|multicast|vpn|labeled-unicast|flowspec|unreachability>"
+#define BGP_SAFI_WITH_LABEL_HELP_STR                                                               \
+	BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR            \
 		BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR
 
 #define BGP_SELF_ORIG_CMD_STR       "self-originate"
@@ -198,4 +199,6 @@ extern bool peergroup_af_flag_check(struct peer *peer, afi_t afi, safi_t safi,
 				    uint64_t flag);
 extern void bgp_init_ipv6_nexthop_prefer_global(struct bgp *bgp);
 
+extern int set_ecom_list(struct vty *vty, int argc, struct cmd_token **argv,
+			 struct ecommunity **list, bool is_rt6);
 #endif /* _QUAGGA_BGP_VTY_H */

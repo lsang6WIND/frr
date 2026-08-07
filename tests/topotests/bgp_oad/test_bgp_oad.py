@@ -10,6 +10,17 @@ Test if local-preference is passed between different EBGP peers when
 EBGP-OAD is configured.
 
 Also check if no-export community is passed to the EBGP-OAD peer.
+
+Also check that the (optional non-transitive) AIGP attribute is propagated
+across EBGP-OAD sessions (r3 -> r2 -> r1) when explicitly enabled with
+"neighbor PEER aigp", but stripped towards a regular EBGP peer (r1 -> r4).
+
+Per draft-uttaro-idr-bgp-oad section 3.20 the default value of AIGP_SESSION
+is "disabled" for EBGP-OAD sessions, hence "neighbor PEER aigp" is configured
+on both ends of each OAD session (r3<->r2, r2<->r1).
+
+Finally, check that AIGP is NOT propagated over an EBGP-OAD session once
+"neighbor PEER aigp" is removed, confirming the default is "disabled".
 """
 
 import os
@@ -35,8 +46,8 @@ def setup_module(mod):
 
     router_list = tgen.routers()
 
-    for _, (rname, router) in enumerate(router_list.items(), 1):
-        router.load_frr_config(os.path.join(CWD, "{}/frr.conf".format(rname)))
+    for router in router_list.values():
+        router.load_frr_config()
 
     tgen.start_router()
 
@@ -139,12 +150,20 @@ def test_bgp_oad():
 
     test_func = functools.partial(
         _bgp_check_non_transitive_extended_community,
-        r4,
+        r1,
     )
     _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
     assert (
         result is None
-    ), "10.10.10.20/32 should be received at r4 with non-transitive extended community"
+    ), "10.10.10.20/32 should be received at r1 with non-transitive extended community (OAD)"
+
+    test_func = functools.partial(
+        _bgp_check_non_transitive_extended_community, r4, None
+    )
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert (
+        result is None
+    ), "10.10.10.20/32 should NOT be received at r4 with non-transitive extended community (not OAD)"
 
     test_func = functools.partial(
         _bgp_check_non_transitive_extended_community, r5, None
@@ -153,6 +172,57 @@ def test_bgp_oad():
     assert (
         result is None
     ), "10.10.10.20/32 should NOT be received at r5 with non-transitive extended community"
+
+    def _bgp_check_aigp(router, arg=None):
+        if arg is None:
+            arg = {"aigpMetric": 50}
+        output = json.loads(
+            router.vtysh_cmd("show bgp ipv4 unicast 10.10.10.20/32 json")
+        )
+        expected = {"paths": [arg]}
+        return topotest.json_cmp(output, expected)
+
+    # AIGP must be propagated across the EBGP-OAD domain (r3 -> r2 -> r1)
+    # when explicitly enabled with "neighbor PEER aigp".
+    test_func = functools.partial(_bgp_check_aigp, r2)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "10.10.10.20/32 should be received at r2 with aigp-metric"
+
+    test_func = functools.partial(_bgp_check_aigp, r1)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "10.10.10.20/32 should be received at r1 with aigp-metric"
+
+    # AIGP must NOT leak towards a regular EBGP peer (r1 -> r4).
+    test_func = functools.partial(_bgp_check_aigp, r4, {"aigpMetric": None})
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert (
+        result is None
+    ), "10.10.10.20/32 should NOT be received at r4 with aigp-metric (not OAD peer)"
+
+    # By default (without "neighbor PEER aigp") AIGP MUST NOT be propagated over
+    # an EBGP-OAD session (draft-uttaro-idr-bgp-oad section 3.20). Disable AIGP
+    # on the r2 -> r1 OAD session only: r2 still learns the AIGP metric from r3
+    # (that session keeps "neighbor aigp"), but r2 must no longer advertise it
+    # to r1.
+    r2.vtysh_cmd(
+        """
+        configure terminal
+        router bgp 65002
+         no neighbor 192.168.1.1 aigp
+        """
+    )
+
+    # r2 still has the AIGP metric (received from r3).
+    test_func = functools.partial(_bgp_check_aigp, r2)
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert result is None, "10.10.10.20/32 should still have aigp-metric at r2"
+
+    # r1 must NOT receive the AIGP metric anymore (OAD session without aigp).
+    test_func = functools.partial(_bgp_check_aigp, r1, {"aigpMetric": None})
+    _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
+    assert (
+        result is None
+    ), "10.10.10.20/32 should NOT have aigp-metric at r1 (OAD session without 'neighbor aigp')"
 
 
 if __name__ == "__main__":

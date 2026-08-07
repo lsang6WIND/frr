@@ -20,6 +20,7 @@
 
 PREDECL_LIST(zebra_announce);
 PREDECL_LIST(zebra_l2_vni);
+PREDECL_HASH(bgp_upa_prefix_hash);
 
 enum bgp_bp_install_type {
 	BGP_BP_INSTALL_ROUTE,
@@ -48,6 +49,14 @@ struct bgp_bp_install_node {
 #include "bgp_damp.h"
 
 #include "lib/bfd.h"
+
+/* UPA prefix tracking structure for typesafe hash.
+ * Wraps a prefix to allow storage in intrusive typesafe hash tables.
+ */
+struct bgp_upa_prefix_entry {
+	struct prefix prefix;
+	struct bgp_upa_prefix_hash_item hash_link;
+};
 
 DECLARE_HOOK(bgp_hook_config_write_vrf, (struct vty *vty, struct vrf *vrf),
 	     (vty, vrf));
@@ -107,6 +116,8 @@ enum bgp_af_index {
 	BGP_AF_IPV4_FLOWSPEC,
 	BGP_AF_IPV6_FLOWSPEC,
 	BGP_AF_BGP_LS,
+	BGP_AF_IPV4_UNREACH,
+	BGP_AF_IPV6_UNREACH,
 	BGP_AF_MAX
 };
 
@@ -232,6 +243,10 @@ struct bgp_master {
 	struct event *t_bgp_zebra_route;
 
 	bool v6_with_v4_nexthops;
+
+	/* Debug buffer for received UPDATE attributes (single-threaded) */
+	char rcvd_attr_str[BUFSIZ];
+	bool rcvd_attr_printed;
 
 	/* To preserve ordering of installations into zebra across all Vrfs */
 	struct zebra_announce_head zebra_announce_head;
@@ -566,6 +581,17 @@ struct bgp_clearing_info {
 #define BGP_IPV6_SAFI_SUPPORTS_NEXTHOP_PREFER_GLOBAL(safi)                                        \
 	((safi) == SAFI_UNICAST || (safi) == SAFI_MULTICAST || (safi) == SAFI_LABELED_UNICAST)
 
+/* EVPN route-target configuration (see bgp_evpn_private.h) */
+struct bgp_evpn_rt_config;
+PREDECL_SORTLIST_UNIQ(bgp_evpn_effective_wildcard_rt_slu);
+PREDECL_SORTLIST_UNIQ(bgp_evpn_effective_fq_rt_slu);
+
+/* EVPN import route-target hash tables (see bgp_evpn_private.h) */
+PREDECL_HASH(bgp_evpn_l2vni_fq_irt);
+PREDECL_HASH(bgp_evpn_l2vni_wildcard_irt);
+PREDECL_HASH(bgp_evpn_vrf_fq_irt);
+PREDECL_HASH(bgp_evpn_vrf_wildcard_irt);
+
 /* BGP instance structure.  */
 struct bgp {
 	/* AS number of this BGP instance.  */
@@ -831,6 +857,23 @@ struct bgp {
 	/* Aggregate address configuration.  */
 	struct bgp_table *aggregate[AFI_MAX][SAFI_MAX];
 
+	/* Global UPA (Unreachable Prefix Announcement) configuration per AFI/SAFI.
+	 *
+	 * upa_enabled[][]      true when "upa originate" configured at AF level.
+	 * upa_drop[][]         true when D-bit should be set on originated UPAs.
+	 * upa_max_routes[][]   global cap on simultaneous UPA entries (0=unlimited).
+	 * upa_routes[][]       typesafe hash of prefixes currently announced as UPA globally;
+	 *                      keyed by prefix, cleaned up in bgp_free().
+	 *
+	 * When upa_enabled is true, BGP originates UPAs for ANY unreachable prefix
+	 * in the RIB (not limited to aggregate constituents). This is independent of
+	 * per-aggregate UPA configuration in struct bgp_aggregate.
+	 */
+	bool upa_enabled[AFI_MAX][SAFI_MAX];
+	bool upa_drop[AFI_MAX][SAFI_MAX];
+	uint32_t upa_max_routes[AFI_MAX][SAFI_MAX];
+	struct bgp_upa_prefix_hash_head upa_routes[AFI_MAX][SAFI_MAX];
+
 	/* BGP routing information base.  */
 	struct bgp_table *rib[AFI_MAX][SAFI_MAX];
 
@@ -962,19 +1005,24 @@ struct bgp {
 
 	struct bgp_evpn_info *evpn_info;
 
-	/* EVPN - use RFC 8365 to auto-derive RT */
-	int advertise_autort_rfc8365;
+	/* EVPN - use RFC 8365 to auto-derive RT, per direction */
+	bool autort_rfc8365_import;
+	bool autort_rfc8365_export;
 
 	/*
 	 * Flooding mechanism for BUM packets for VxLAN-EVPN.
 	 */
 	enum vxlan_flood_control vxlan_flood_ctrl;
 
-	/* Hash table of Import RTs to EVIs */
-	struct hash *import_rt_hash;
+	/* Hash tables of fully qualified and wildcard import RTs to VNIs */
+	struct bgp_evpn_l2vni_fq_irt_head l2vni_fq_irt_nodes;
+	struct bgp_evpn_l2vni_wildcard_irt_head l2vni_wildcard_irt_nodes;
 
-	/* Hash table of VRF import RTs to VRFs */
-	struct hash *vrf_import_rt_hash;
+	/* Hash tables of fully qualified and wildcard VRF import RTs to
+	 * VRFs
+	 */
+	struct bgp_evpn_vrf_fq_irt_head vrf_fq_irt_nodes;
+	struct bgp_evpn_vrf_wildcard_irt_head vrf_wildcard_irt_nodes;
 
 	/* L3-VNI corresponding to this vrf */
 	vni_t l3vni;
@@ -1006,10 +1054,10 @@ struct bgp {
 	/* vrf flags */
 	uint32_t vrf_flags;
 #define BGP_VRF_AUTO                        (1 << 0)
-#define BGP_VRF_IMPORT_RT_CFGD              (1 << 1)
-#define BGP_VRF_EXPORT_RT_CFGD              (1 << 2)
-#define BGP_VRF_IMPORT_AUTO_RT_CFGD         (1 << 3) /* retain auto when cfgd */
-#define BGP_VRF_EXPORT_AUTO_RT_CFGD         (1 << 4) /* retain auto when cfgd */
+/* Bits (1 << 1) through (1 << 4) are unused. They used to be the
+ * BGP_VRF_{IMPORT,EXPORT}[_AUTO]_RT_CFGD flags, which are superseded by
+ * the vrf_route_target_config structure.
+ */
 #define BGP_VRF_RD_CFGD                     (1 << 5)
 #define BGP_VRF_L3VNI_PREFIX_ROUTES_ONLY    (1 << 6)
 /* per-VRF toVPN SID */
@@ -1027,11 +1075,15 @@ struct bgp {
 	struct prefix_rd vrf_prd;
 	char *vrf_prd_pretty;
 
-	/* import rt list for the vrf instance */
-	struct list *vrf_import_rtl;
+	/* User route-target configuration of this L3VNI VRF */
+	struct bgp_evpn_rt_config *vrf_route_target_config;
 
-	/* export rt list for the vrf instance */
-	struct list *vrf_export_rtl;
+	/* Derived route targets: wildcard import (match local admin only),
+	 * fully qualified import, fully qualified export
+	 */
+	struct bgp_evpn_effective_wildcard_rt_slu_head effective_wildcard_import_rts;
+	struct bgp_evpn_effective_fq_rt_slu_head effective_fq_import_rts;
+	struct bgp_evpn_effective_fq_rt_slu_head effective_fq_export_rts;
 
 	/* list of corresponding l2vnis (struct bgpevpn) */
 	struct list *l2vnis;
@@ -1627,6 +1679,8 @@ struct peer {
 	struct peer_connection *connection;
 
 	int ttl;	     /* TTL of TCP connection to the peer. */
+	/* configured ebgp-multihop hop count; 0 if none */
+	int cfg_ttl;
 	int rtt;	     /* Estimated round-trip-time from TCP_INFO */
 	int rtt_expected; /* Expected round-trip-time for a peer */
 	uint8_t rtt_keepalive_rcv; /* Received count for RTT shutdown */
@@ -1852,6 +1906,7 @@ struct peer {
 /* BGP-LS per-peer link identifiers configured */
 #define PEER_FLAG_LS_LOCAL_LINK_ID  (1ULL << 49)
 #define PEER_FLAG_LS_REMOTE_LINK_ID (1ULL << 50)
+#define PEER_FLAG_EBGP_MULTIHOP	    (1ULL << 51) /* explicit ebgp-multihop config */
 
 	/*
 	 *GR-Disabled mode means unset PEER_FLAG_GRACEFUL_RESTART
@@ -1879,8 +1934,8 @@ struct peer {
 	/* Last update packet sent time */
 	time_t pkt_stime[AFI_MAX][SAFI_MAX];
 
-	/* Peer / peer group route flap dampening configuration */
-	struct bgp_damp_config damp[AFI_MAX][SAFI_MAX];
+	/* Peer / peer group route flap dampening configuration (allocated on demand) */
+	struct bgp_damp_config *damp[AFI_MAX][SAFI_MAX];
 
 	/* Peer Per AF flags */
 	/*
@@ -1923,12 +1978,17 @@ struct peer {
 #define PEER_FLAG_SOO (1ULL << 28)
 #define PEER_FLAG_SEND_EXT_COMMUNITY_RPKI (1ULL << 29)
 #define PEER_FLAG_ADDPATH_RX_PATHS_LIMIT (1ULL << 30)
-#define PEER_FLAG_CONFIG_DAMPENING (1ULL << 31)
 #define PEER_FLAG_CONFIG_ENCAPSULATION_SRV6	(1ULL << 32)
 #define PEER_FLAG_CONFIG_ENCAPSULATION_SRV6_RELAX (1ULL << 33)
 #define PEER_FLAG_CONFIG_ENCAPSULATION_MPLS	  (1ULL << 34)
 #define PEER_FLAG_BGP_LS_IPV4			  (1ULL << 35)
 #define PEER_FLAG_BGP_LS_IPV6			  (1ULL << 36)
+/* UPA (Unreachable Prefix Announcement) enabled for this peer.
+ * Governs both directions: send UPA routes to this peer, and honor the
+ * D-bit of UPA routes received from it (install a blackhole/drop entry).
+ * Without this flag a received UPA route is never installed into zebra.
+ */
+#define PEER_FLAG_UPA	     (1ULL << 37)
 #define PEER_FLAG_ACCEPT_OWN (1ULL << 63)
 
 	enum bgp_addpath_strat addpath_type[AFI_MAX][SAFI_MAX];
@@ -2098,19 +2158,6 @@ struct peer {
 
 	/* ORF Prefix-list */
 	struct prefix_list *orf_plist[AFI_MAX][SAFI_MAX];
-
-	/* Text description of last attribute rcvd */
-	char rcvd_attr_str[BUFSIZ];
-
-	/*
-	 * Track if we printed the attribute in debugs
-	 *
-	 * These two rcvd_attr_str and rcvd_attr_printed are going to
-	 * be fun in the long term when we want to break up parsing
-	 * of data from the nlri in multiple pthreads or really
-	 * if we ever change order of things this will just break
-	 */
-	bool rcvd_attr_printed;
 
 	/* Accepted prefix count */
 	uint32_t pcount[AFI_MAX][SAFI_MAX];
@@ -2749,6 +2796,7 @@ extern void bgp_confederation_id_set(struct bgp *bgp, as_t as,
 				     const char *as_str);
 extern void bgp_confederation_id_unset(struct bgp *bgp);
 extern bool bgp_confederation_peers_check(struct bgp *bgp, as_t as);
+extern as_t bgp_local_as_for_peer(struct peer *peer);
 
 extern void bgp_confederation_peers_add(struct bgp *bgp, as_t as,
 					const char *as_str);
@@ -2813,8 +2861,10 @@ extern void peer_af_flag_inherit(struct peer *peer, afi_t afi, safi_t safi,
 extern void peer_change_action(struct peer *peer, afi_t afi, safi_t safi,
 			       enum peer_change_type type);
 
-extern int peer_ebgp_multihop_set(struct peer *peer, int ttl);
-extern int peer_ebgp_multihop_unset(struct peer *peer);
+extern int peer_ebgp_multihop_set(struct peer *peer, int ttl, bool record_cfg);
+extern int peer_ebgp_multihop_unset(struct peer *peer, bool record_cfg);
+extern void peer_cfg_ttl_set(struct peer *peer, int cfg_ttl);
+extern int peer_gtsm_configured(struct peer *peer);
 extern int is_ebgp_multihop_configured(struct peer *peer);
 
 extern int peer_role_set(struct peer *peer, uint8_t role, bool strict_mode);
@@ -3013,6 +3063,9 @@ static inline int afindex(afi_t afi, safi_t safi)
 		case SAFI_FLOWSPEC:
 			return BGP_AF_IPV4_FLOWSPEC;
 		case SAFI_BGP_LS:
+			return BGP_AF_BGP_LS;
+		case SAFI_UNREACH:
+			return BGP_AF_IPV4_UNREACH;
 		case SAFI_EVPN:
 		case SAFI_UNSPEC:
 		case SAFI_MAX:
@@ -3034,6 +3087,9 @@ static inline int afindex(afi_t afi, safi_t safi)
 		case SAFI_FLOWSPEC:
 			return BGP_AF_IPV6_FLOWSPEC;
 		case SAFI_BGP_LS:
+			return BGP_AF_BGP_LS;
+		case SAFI_UNREACH:
+			return BGP_AF_IPV6_UNREACH;
 		case SAFI_EVPN:
 		case SAFI_UNSPEC:
 		case SAFI_MAX:
@@ -3051,6 +3107,7 @@ static inline int afindex(afi_t afi, safi_t safi)
 		case SAFI_MPLS_VPN:
 		case SAFI_ENCAP:
 		case SAFI_FLOWSPEC:
+		case SAFI_UNREACH:
 		case SAFI_UNSPEC:
 		case SAFI_MAX:
 			return BGP_AF_MAX;
@@ -3067,6 +3124,7 @@ static inline int afindex(afi_t afi, safi_t safi)
 		case SAFI_ENCAP:
 		case SAFI_EVPN:
 		case SAFI_FLOWSPEC:
+		case SAFI_UNREACH:
 		case SAFI_UNSPEC:
 		case SAFI_MAX:
 			return BGP_AF_MAX;
@@ -3092,13 +3150,10 @@ static inline int peer_group_active(struct peer *peer)
 /* If peer is negotiated at least one address family return 1. */
 static inline int peer_afi_active_nego(const struct peer *peer, afi_t afi)
 {
-	if (peer->afc_nego[afi][SAFI_UNICAST]
-	    || peer->afc_nego[afi][SAFI_MULTICAST]
-	    || peer->afc_nego[afi][SAFI_LABELED_UNICAST]
-	    || peer->afc_nego[afi][SAFI_MPLS_VPN]
-	    || peer->afc_nego[afi][SAFI_ENCAP]
-	    || peer->afc_nego[afi][SAFI_FLOWSPEC]
-	    || peer->afc_nego[afi][SAFI_EVPN])
+	if (peer->afc_nego[afi][SAFI_UNICAST] || peer->afc_nego[afi][SAFI_MULTICAST] ||
+	    peer->afc_nego[afi][SAFI_LABELED_UNICAST] || peer->afc_nego[afi][SAFI_MPLS_VPN] ||
+	    peer->afc_nego[afi][SAFI_ENCAP] || peer->afc_nego[afi][SAFI_FLOWSPEC] ||
+	    peer->afc_nego[afi][SAFI_UNREACH] || peer->afc_nego[afi][SAFI_EVPN])
 		return 1;
 	return 0;
 }
@@ -3112,12 +3167,14 @@ static inline int peer_group_af_configured(struct peer_group *group)
 	    || peer->afc[AFI_IP][SAFI_LABELED_UNICAST]
 	    || peer->afc[AFI_IP][SAFI_FLOWSPEC]
 	    || peer->afc[AFI_IP][SAFI_MPLS_VPN] || peer->afc[AFI_IP][SAFI_ENCAP]
+	    || peer->afc[AFI_IP][SAFI_UNREACH]
 	    || peer->afc[AFI_IP6][SAFI_UNICAST]
 	    || peer->afc[AFI_IP6][SAFI_MULTICAST]
 	    || peer->afc[AFI_IP6][SAFI_LABELED_UNICAST]
 	    || peer->afc[AFI_IP6][SAFI_MPLS_VPN]
 	    || peer->afc[AFI_IP6][SAFI_ENCAP]
 	    || peer->afc[AFI_IP6][SAFI_FLOWSPEC]
+	    || peer->afc[AFI_IP6][SAFI_UNREACH]
 	    || peer->afc[AFI_L2VPN][SAFI_EVPN]
 	    || peer->afc[AFI_BGP_LS][SAFI_BGP_LS])
 		return 1;
@@ -3305,14 +3362,27 @@ static inline bool bgp_gr_is_forwarding_preserved(struct bgp *bgp)
 		CHECK_FLAG(bgp->flags, BGP_FLAG_GR_PRESERVE_FWD));
 }
 
+static inline bool bgp_gr_is_forwarding_preserved_for_safi(struct bgp *bgp, afi_t afi, safi_t safi)
+{
+	/* SAFI_UNREACH has no forwarding state (purely control-plane UI-RIB).
+	 * Per RFC 4724, F-bit indicates forwarding state preservation.
+	 * Since there's no forwarding state, F=0.
+	 */
+	if (safi == SAFI_UNREACH)
+		return false;
+
+	return bgp_gr_is_forwarding_preserved(bgp);
+}
+
 static inline bool bgp_gr_supported_for_afi_safi(afi_t afi, safi_t safi)
 {
 	/*
 	 * GR restarter behavior is supported only for IPv4-unicast,
-	 * IPv6-unicast and L2vpn EVPN
+	 * IPv6-unicast, L2vpn EVPN, and IPv4/IPv6 unreachability
 	 */
 	if ((afi == AFI_IP && safi == SAFI_UNICAST) || (afi == AFI_IP6 && safi == SAFI_UNICAST) ||
-	    (afi == AFI_L2VPN && safi == SAFI_EVPN))
+	    (afi == AFI_L2VPN && safi == SAFI_EVPN) || (afi == AFI_IP && safi == SAFI_UNREACH) ||
+	    (afi == AFI_IP6 && safi == SAFI_UNREACH))
 		return true;
 	return false;
 }
